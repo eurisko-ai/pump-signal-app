@@ -2,7 +2,7 @@
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, CheckConstraint, Enum
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.dialects.postgresql import VECTOR
+from pgvector.sqlalchemy import Vector
 import enum
 
 Base = declarative_base()
@@ -27,7 +27,7 @@ class Token(Base):
     price_change_1h = Column(Float, nullable=True)
     created_timestamp = Column(DateTime, nullable=True)
     last_tx_timestamp = Column(DateTime, nullable=True)
-    embedding = Column(VECTOR(dim=384), nullable=True)
+    embedding = Column(Vector(384), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

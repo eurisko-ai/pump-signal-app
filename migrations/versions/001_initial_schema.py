@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column('price_change_1h', sa.Float(), nullable=True),
         sa.Column('created_timestamp', sa.DateTime(), nullable=True),
         sa.Column('last_tx_timestamp', sa.DateTime(), nullable=True),
-        sa.Column('embedding', postgresql.VECTOR(dim=384), nullable=True),
+        sa.Column('embedding', postgresql.VECTOR(), nullable=True),
         sa.Column('created_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column('updated_at', sa.DateTime(), server_default=sa.func.now(), onupdate=sa.func.now()),
         sa.CheckConstraint("mint LIKE '%pump'", name='check_ca_ends_with_pump'),

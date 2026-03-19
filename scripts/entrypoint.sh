@@ -20,8 +20,7 @@ echo "PostgreSQL is ready!"
 
 # Run migrations
 echo "Running database migrations..."
-cd /app
-alembic upgrade head || true
+python3 /app/scripts/run_migrations.py
 
 # Start FastAPI app
 echo "Starting FastAPI application..."
