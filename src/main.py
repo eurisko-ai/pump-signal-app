@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from src.config import get_settings
 from src.utils.logger import setup_logger
-from src.tasks.scanner import start_scanner
+from src.tasks.websocket_scanner import start_websocket_scanner
 from src.tasks.housekeeper import start_housekeeper
 from src.routers import api, health
 
@@ -22,8 +22,8 @@ async def lifespan(app: FastAPI):
     
     # Startup
     global scanner_task, housekeeper_task
-    scanner_task = asyncio.create_task(start_scanner())
-    logger.info("Scanner task started")
+    scanner_task = asyncio.create_task(start_websocket_scanner())
+    logger.info("WebSocket scanner task started")
     
     housekeeper_task = asyncio.create_task(start_housekeeper())
     logger.info("Housekeeper task started")
