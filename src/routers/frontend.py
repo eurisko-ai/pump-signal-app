@@ -107,30 +107,16 @@ async def get_signal_history(
     try:
         conn = await get_db()
         
-        if signal_type:
-            signals = await conn.fetch(
-                """
-                SELECT a.id, a.token_id, a.sent_at, t.name, t.symbol, t.mint
-                FROM alerts a
-                JOIN tokens t ON a.token_id = t.id
-                WHERE a.message LIKE $1
-                ORDER BY a.sent_at DESC
-                LIMIT $2
-                """,
-                f"%{signal_type}%",
-                limit
-            )
-        else:
-            signals = await conn.fetch(
-                """
-                SELECT a.id, a.token_id, a.sent_at, t.name, t.symbol, t.mint
-                FROM alerts a
-                JOIN tokens t ON a.token_id = t.id
-                ORDER BY a.sent_at DESC
-                LIMIT $1
-                """,
-                limit
-            )
+        signals = await conn.fetch(
+            """
+            SELECT s.id, s.token_id, s.created_at, t.name, t.symbol, t.mint, s.score
+            FROM signals s
+            JOIN tokens t ON s.token_id = t.id
+            ORDER BY s.created_at DESC
+            LIMIT $1
+            """,
+            limit
+        )
         
         await conn.close()
         
@@ -141,7 +127,8 @@ async def get_signal_history(
                 "name": s["name"],
                 "symbol": s["symbol"],
                 "mint": s["mint"],
-                "sent_at": s["sent_at"].isoformat()
+                "score": s["score"],
+                "created_at": s["created_at"].isoformat()
             }
             for s in signals
         ]
@@ -154,49 +141,21 @@ async def get_signal_history(
 # ============================================================================
 @router.get("/signals/active")
 async def get_active_signals():
-    """Get currently active signals by type"""
+    """Get currently active signals (high-scoring recent tokens)"""
     try:
         conn = await get_db()
         
-        # Get unsent alerts (active signals)
-        buy_signals = await conn.fetch(
+        # Get recent high-scoring signals
+        high_score_signals = await conn.fetch(
             """
-            SELECT a.id, a.token_id, a.created_at, t.name, t.symbol, t.mint
-            FROM alerts a
-            JOIN tokens t ON a.token_id = t.id
-            WHERE a.sent = FALSE AND a.message LIKE '%BUY%'
-            ORDER BY a.created_at DESC
-            """
-        )
-        
-        sell_signals = await conn.fetch(
-            """
-            SELECT a.id, a.token_id, a.created_at, t.name, t.symbol, t.mint
-            FROM alerts a
-            JOIN tokens t ON a.token_id = t.id
-            WHERE a.sent = FALSE AND a.message LIKE '%SELL%'
-            ORDER BY a.created_at DESC
-            """
-        )
-        
-        pump_signals = await conn.fetch(
-            """
-            SELECT a.id, a.token_id, a.created_at, t.name, t.symbol, t.mint
-            FROM alerts a
-            JOIN tokens t ON a.token_id = t.id
-            WHERE a.sent = FALSE AND a.message LIKE '%PUMP%'
-            ORDER BY a.created_at DESC
-            """
-        )
-        
-        danger_signals = await conn.fetch(
-            """
-            SELECT a.id, a.token_id, a.created_at, t.name, t.symbol, t.mint
-            FROM alerts a
-            JOIN tokens t ON a.token_id = t.id
-            WHERE a.sent = FALSE AND a.message LIKE '%WHALE%'
-            ORDER BY a.created_at DESC
-            """
+            SELECT s.id, s.token_id, s.created_at, s.score, t.name, t.symbol, t.mint
+            FROM signals s
+            JOIN tokens t ON s.token_id = t.id
+            WHERE s.score >= $1 AND s.created_at > NOW() - INTERVAL '1 hour'
+            ORDER BY s.created_at DESC
+            LIMIT 50
+            """,
+            settings.alert_threshold
         )
         
         await conn.close()
@@ -209,16 +168,15 @@ async def get_active_signals():
                     "name": s["name"],
                     "symbol": s["symbol"],
                     "mint": s["mint"],
+                    "score": s["score"],
                     "created_at": s["created_at"].isoformat()
                 }
                 for s in signals
             ]
         
         return {
-            "BUY": format_signals(buy_signals),
-            "SELL": format_signals(sell_signals),
-            "PUMP": format_signals(pump_signals),
-            "DANGER": format_signals(danger_signals)
+            "high_score": format_signals(high_score_signals),
+            "total_active": len(high_score_signals)
         }
     except Exception as e:
         logger.error(f"Error fetching active signals: {e}")
