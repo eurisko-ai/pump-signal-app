@@ -12,11 +12,12 @@ settings = get_settings()
 telegram = TelegramService()
 
 async def get_db():
+    """Get database connection"""
     return await asyncpg.connect(settings.database_url)
 
 async def start_momentum_alerter():
     """Watch momentum engine every 1 second and post alerts"""
-    logger.info("Momentum alerter started")
+    logger.info("🔥 Momentum alerter started - monitoring for real pumps")
     
     alerted_tokens = set()  # Track which tokens we've already alerted on
     
@@ -30,45 +31,52 @@ async def start_momentum_alerter():
 
 async def check_momentum_signals(alerted_tokens: set):
     """Check all tokens for pump signals"""
-    conn = await get_db()
-    
-    for token_id in list(momentum_engine.token_trades.keys()):
-        try:
-            metrics = momentum_engine.get_all_metrics(token_id)
-            
-            if not metrics:
-                continue
-            
-            token = await conn.fetchrow(
-                "SELECT mint, name, symbol FROM tokens WHERE id = $1",
-                token_id
-            )
-            
-            if not token:
-                continue
-            
-            # Check for PRE-PUMP signal
-            if (metrics['momentum_15s'] > 50 and 
-                metrics['acceleration_15s'] > 1.5 and 
-                not metrics['is_whale_dump'] and
-                token_id not in alerted_tokens):
-                
-                await post_prepump_alert(token, metrics)
-                alerted_tokens.add(token_id)
-            
-            # Check for momentum fading
-            elif metrics['pump_signal'] < 20 and token_id in alerted_tokens:
-                await post_momentum_fading_alert(token, metrics)
-                alerted_tokens.discard(token_id)
-            
-            # Check for whale dump
-            if metrics['is_whale_dump']:
-                await post_whale_dump_alert(token, metrics)
+    try:
+        # Get all active token IDs from momentum engine
+        if not hasattr(momentum_engine, 'token_trades') or not momentum_engine.token_trades:
+            return
         
-        except Exception as e:
-            logger.error(f"Error checking token {token_id}: {e}")
-    
-    await conn.close()
+        conn = await get_db()
+        
+        for token_id in list(momentum_engine.token_trades.keys()):
+            try:
+                metrics = momentum_engine.get_all_metrics(token_id)
+                
+                if not metrics:
+                    continue
+                
+                token = await conn.fetchrow(
+                    "SELECT mint, name, symbol FROM tokens WHERE id = $1",
+                    token_id
+                )
+                
+                if not token:
+                    continue
+                
+                # Check for PRE-PUMP signal
+                if (metrics['momentum_15s'] > 50 and 
+                    metrics['acceleration_15s'] > 1.5 and 
+                    not metrics['is_whale_dump'] and
+                    token_id not in alerted_tokens):
+                    
+                    await post_prepump_alert(token, metrics)
+                    alerted_tokens.add(token_id)
+                
+                # Check for momentum fading (exit signal)
+                elif metrics['pump_signal'] < 20 and token_id in alerted_tokens:
+                    await post_momentum_fading_alert(token, metrics)
+                    alerted_tokens.discard(token_id)
+                
+                # Check for whale dump (always alert, even if not pre-pumped)
+                if metrics['is_whale_dump']:
+                    await post_whale_dump_alert(token, metrics)
+            
+            except Exception as e:
+                logger.error(f"Error checking token {token_id}: {e}")
+        
+        await conn.close()
+    except Exception as e:
+        logger.error(f"DB connection error in alerter: {e}")
 
 async def post_prepump_alert(token: dict, metrics: dict):
     """Post PRE-PUMP alert"""
@@ -90,8 +98,11 @@ Token likely to migrate soon. Monitor for post-migration pump.
 
 CA: <code>{token['mint']}</code>"""
     
-    await telegram.send_alert(message)
-    logger.info(f"✅ PRE-PUMP alert posted for {token['name']}")
+    try:
+        await telegram.send_alert(message)
+        logger.info(f"✅ PRE-PUMP alert posted for {token['name']}")
+    except Exception as e:
+        logger.error(f"Failed to send PRE-PUMP alert: {e}")
 
 async def post_momentum_fading_alert(token: dict, metrics: dict):
     """Post momentum fading alert"""
@@ -101,8 +112,11 @@ Momentum declining. Consider exiting if you're in.
 
 Pump Signal: {metrics['pump_signal']}/100"""
     
-    await telegram.send_alert(message)
-    logger.info(f"⚠️ Momentum fading alert for {token['name']}")
+    try:
+        await telegram.send_alert(message)
+        logger.info(f"⚠️ Momentum fading alert for {token['name']}")
+    except Exception as e:
+        logger.error(f"Failed to send fading alert: {e}")
 
 async def post_whale_dump_alert(token: dict, metrics: dict):
     """Post whale dump alert"""
@@ -115,5 +129,8 @@ Whale Concentration: {metrics['whale_concentration']*100:.1f}%
 
 CA: <code>{token['mint']}</code>"""
     
-    await telegram.send_alert(message)
-    logger.info(f"🐋 Whale dump alert for {token['name']}")
+    try:
+        await telegram.send_alert(message)
+        logger.info(f"🐋 Whale dump alert for {token['name']}")
+    except Exception as e:
+        logger.error(f"Failed to send whale dump alert: {e}")

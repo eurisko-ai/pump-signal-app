@@ -19,6 +19,7 @@ from websockets.exceptions import ConnectionClosed, InvalidURI, InvalidHandshake
 from src.config import get_settings
 from src.services.scoring import scoring
 from src.services.telegram_service import TelegramService
+from src.tasks.trade_tracker import trade_tracker
 from src.utils.logger import setup_logger
 
 logger = setup_logger("ws_scanner")
@@ -282,6 +283,21 @@ async def _handle_migration(event: Dict, sol_price: float):
     # --- DB insert (always for migrations) ---
     signal_id = await _insert_token_and_signal(token, score, breakdown)
 
+    # --- Phase 2: Start tracking trades for this migrated token ---
+    if signal_id:
+        try:
+            # Fetch token_id from DB for trade tracker
+            pool = await _get_pool()
+            async with pool.acquire() as conn:
+                token_id = await conn.fetchval(
+                    "SELECT id FROM tokens WHERE mint = $1", mint
+                )
+            if token_id:
+                await trade_tracker.track_token(mint, token_id)
+                logger.info(f"📊 Trade tracker monitoring {token['name']} post-migration")
+        except Exception as e:
+            logger.debug(f"Trade tracker registration error: {e}")
+
     # --- Alert if threshold met ---
     if signal_id and score >= settings.alert_threshold:
         await _post_alert(token, score, breakdown, signal_id)
@@ -299,16 +315,17 @@ async def _handle_create(event: Dict, sol_price: float):
 
     token = _build_token_dict_from_create(event, sol_price)
 
-    # Just insert/update the token row — no signal, no alert
+    # Insert token + start tracking trades (Phase 2: pre-migration momentum)
     try:
         pool = await _get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
+            token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, market_cap,
                                     volume_24h, holders, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                ON CONFLICT (mint) DO NOTHING
+                ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
+                RETURNING id
                 """,
                 token["mint"],
                 token.get("name", ""),
@@ -318,6 +335,9 @@ async def _handle_create(event: Dict, sol_price: float):
                 0,
                 1,
             )
+        # Phase 2: Track trades from creation to detect pre-migration momentum
+        if token_id:
+            track_token(token_id, token["mint"], is_migrated=False)
     except Exception as e:
         logger.debug(f"Create insert error (non-critical): {e}")
 

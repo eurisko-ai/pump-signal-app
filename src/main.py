@@ -6,6 +6,8 @@ from src.config import get_settings
 from src.utils.logger import setup_logger
 from src.tasks.websocket_scanner import start_websocket_scanner
 from src.tasks.housekeeper import start_housekeeper
+from src.tasks.trade_tracker import start_trade_tracker
+from src.tasks.momentum_alerter import start_momentum_alerter
 from src.routers import api, health
 
 logger = setup_logger("main")
@@ -14,6 +16,8 @@ settings = get_settings()
 # Global state
 scanner_task = None
 housekeeper_task = None
+trade_tracker_task = None
+momentum_alerter_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,29 +25,35 @@ async def lifespan(app: FastAPI):
     logger.info("=== Pump Signal App Starting ===")
     
     # Startup
-    global scanner_task, housekeeper_task
+    global scanner_task, housekeeper_task, trade_tracker_task, momentum_alerter_task
     scanner_task = asyncio.create_task(start_websocket_scanner())
     logger.info("WebSocket scanner task started")
     
     housekeeper_task = asyncio.create_task(start_housekeeper())
     logger.info("Housekeeper task started")
     
+    # Phase 2: High-frequency momentum detection
+    trade_tracker_task = asyncio.create_task(start_trade_tracker())
+    logger.info("Trade tracker task started (Phase 2)")
+    
+    momentum_alerter_task = asyncio.create_task(start_momentum_alerter())
+    logger.info("Momentum alerter task started (Phase 2)")
+    
     yield
     
     # Shutdown
-    if scanner_task:
-        scanner_task.cancel()
-        try:
-            await scanner_task
-        except asyncio.CancelledError:
-            logger.info("Scanner task cancelled")
-    
-    if housekeeper_task:
-        housekeeper_task.cancel()
-        try:
-            await housekeeper_task
-        except asyncio.CancelledError:
-            logger.info("Housekeeper task cancelled")
+    for name, task in [
+        ("Scanner", scanner_task),
+        ("Housekeeper", housekeeper_task),
+        ("Trade tracker", trade_tracker_task),
+        ("Momentum alerter", momentum_alerter_task),
+    ]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info(f"{name} task cancelled")
     
     logger.info("=== Pump Signal App Shutdown ===")
 
