@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import asyncpg
 from src.config import get_settings
 from src.utils.logger import setup_logger
+from src.tasks.housekeeper import get_cleanup_stats
 
 router = APIRouter()
 logger = setup_logger("health")
@@ -42,3 +43,16 @@ async def readiness():
     except Exception as e:
         logger.error(f"Readiness check failed: {e}")
         raise HTTPException(status_code=503, detail="Service not ready")
+
+@router.get("/stats")
+async def get_stats():
+    """Get database statistics (used by housekeeper monitoring)"""
+    try:
+        stats = await get_cleanup_stats()
+        return {
+            "stats": stats,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Stats check failed: {e}")
+        raise HTTPException(status_code=503, detail="Could not fetch stats")

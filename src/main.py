@@ -5,6 +5,7 @@ import asyncio
 from src.config import get_settings
 from src.utils.logger import setup_logger
 from src.tasks.scanner import start_scanner
+from src.tasks.housekeeper import start_housekeeper
 from src.routers import api, health
 
 logger = setup_logger("main")
@@ -12,6 +13,7 @@ settings = get_settings()
 
 # Global state
 scanner_task = None
+housekeeper_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,9 +21,12 @@ async def lifespan(app: FastAPI):
     logger.info("=== Pump Signal App Starting ===")
     
     # Startup
-    global scanner_task
+    global scanner_task, housekeeper_task
     scanner_task = asyncio.create_task(start_scanner())
     logger.info("Scanner task started")
+    
+    housekeeper_task = asyncio.create_task(start_housekeeper())
+    logger.info("Housekeeper task started")
     
     yield
     
@@ -32,6 +37,13 @@ async def lifespan(app: FastAPI):
             await scanner_task
         except asyncio.CancelledError:
             logger.info("Scanner task cancelled")
+    
+    if housekeeper_task:
+        housekeeper_task.cancel()
+        try:
+            await housekeeper_task
+        except asyncio.CancelledError:
+            logger.info("Housekeeper task cancelled")
     
     logger.info("=== Pump Signal App Shutdown ===")
 
