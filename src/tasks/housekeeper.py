@@ -32,55 +32,69 @@ async def run_cleanup():
         logger.info(f"Running cleanup - retention cutoff: {cutoff_time.isoformat()}")
         
         # 1. Delete old scan logs (keep last N hours)
-        deleted_logs = await conn.fetchval(
-            "DELETE FROM scan_log WHERE created_at < $1 RETURNING COUNT(*)",
-            cutoff_time
-        )
-        logger.info(f"Cleaned scan_log: {deleted_logs} records deleted")
+        try:
+            deleted_logs = await conn.fetchval(
+                "DELETE FROM scan_log WHERE scan_date < $1",
+                cutoff_time
+            )
+            logger.info(f"Cleaned scan_log: {deleted_logs or 0} records deleted")
+        except Exception as e:
+            logger.warning(f"scan_log cleanup failed: {e}")
         
         # 2. Delete old token price history (keep last N hours)
-        deleted_history = await conn.fetchval(
-            "DELETE FROM token_price_history WHERE recorded_at < $1 RETURNING COUNT(*)",
-            cutoff_time
-        )
-        logger.info(f"Cleaned token_price_history: {deleted_history} records deleted")
+        try:
+            deleted_history = await conn.fetchval(
+                "DELETE FROM token_price_history WHERE recorded_at < $1",
+                cutoff_time
+            )
+            logger.info(f"Cleaned token_price_history: {deleted_history or 0} records deleted")
+        except Exception as e:
+            logger.warning(f"token_price_history cleanup failed: {e}")
         
         # 3. Delete old alerts (keep last N hours) - but keep "posted" status for reference
-        deleted_alerts = await conn.fetchval(
-            """
-            DELETE FROM alerts 
-            WHERE created_at < $1 AND status IN ('failed', 'skipped')
-            RETURNING COUNT(*)
-            """,
-            cutoff_time
-        )
-        logger.info(f"Cleaned alerts: {deleted_alerts} old/failed records deleted")
+        try:
+            deleted_alerts = await conn.fetchval(
+                "DELETE FROM alerts WHERE created_at < $1 AND status::text != 'posted'",
+                cutoff_time
+            )
+            logger.info(f"Cleaned alerts: {deleted_alerts or 0} old/failed records deleted")
+        except Exception as e:
+            logger.warning(f"alerts cleanup failed: {e}")
         
         # 4. Delete orphaned signals (no associated alerts, older than retention)
-        deleted_signals = await conn.fetchval(
-            """
-            DELETE FROM signals s
-            WHERE s.created_at < $1
-            AND NOT EXISTS (SELECT 1 FROM alerts a WHERE a.signal_id = s.id AND a.created_at > $1)
-            RETURNING COUNT(*)
-            """,
-            cutoff_time
-        )
-        logger.info(f"Cleaned signals: {deleted_signals} old/orphaned records deleted")
+        try:
+            await conn.execute(
+                """
+                DELETE FROM signals s
+                WHERE s.created_at < $1
+                AND NOT EXISTS (SELECT 1 FROM alerts a WHERE a.signal_id = s.id AND a.created_at > $1)
+                """,
+                cutoff_time
+            )
+            deleted_signals = await conn.fetchval(
+                "SELECT COUNT(*) FROM signals WHERE created_at < $1",
+                cutoff_time
+            )
+            logger.info(f"Cleaned signals: orphaned records deleted (remaining: {deleted_signals or 0})")
+        except Exception as e:
+            logger.warning(f"signals cleanup failed: {e}")
         
         # 5. Keep tokens forever (they're the source data), but log inactive ones
-        inactive_tokens = await conn.fetchval(
-            """
-            SELECT COUNT(*) FROM tokens t
-            WHERE t.updated_at < $1
-            """,
-            cutoff_time
-        )
-        logger.info(f"Inactive tokens (no recent signals): {inactive_tokens}")
+        try:
+            inactive_tokens = await conn.fetchval(
+                "SELECT COUNT(*) FROM tokens t WHERE t.updated_at < $1",
+                cutoff_time
+            )
+            logger.info(f"Inactive tokens (no recent signals): {inactive_tokens or 0}")
+        except Exception as e:
+            logger.warning(f"Token stats failed: {e}")
         
         # 6. Vacuum to reclaim space
-        await conn.execute("VACUUM ANALYZE")
-        logger.info("✅ Cleanup complete - VACUUM ANALYZE done")
+        try:
+            await conn.execute("VACUUM ANALYZE")
+            logger.info("✅ Cleanup complete - VACUUM ANALYZE done")
+        except Exception as e:
+            logger.warning(f"VACUUM failed: {e}")
         
         await conn.close()
         
