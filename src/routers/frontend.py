@@ -200,10 +200,10 @@ async def get_dashboard_stats():
             settings.alert_threshold
         )
         
-        # Alerts sent today
+        # Signals created today
         today = datetime.utcnow().date()
-        alerts_today = await conn.fetchval(
-            "SELECT COUNT(*) FROM alerts WHERE DATE(sent_at) = $1",
+        signals_today = await conn.fetchval(
+            "SELECT COUNT(*) FROM signals WHERE DATE(created_at) = $1",
             today
         )
         
@@ -212,7 +212,7 @@ async def get_dashboard_stats():
         return {
             "total_tokens": total_tokens or 0,
             "good_signals": good_signals or 0,
-            "alerts_today": alerts_today or 0,
+            "signals_today": signals_today or 0,
             "active_tracked": len(momentum_engine.token_trades) if hasattr(momentum_engine, 'token_trades') else 0
         }
     except Exception as e:
