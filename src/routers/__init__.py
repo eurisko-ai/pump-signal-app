@@ -1,3 +1,3 @@
-from . import api, health, frontend
+from . import api, health, frontend, sse
 
-__all__ = ["api", "health", "frontend"]
+__all__ = ["api", "health", "frontend", "sse"]

@@ -8,7 +8,7 @@ from src.tasks.websocket_scanner import start_websocket_scanner
 from src.tasks.housekeeper import start_housekeeper
 from src.tasks.trade_tracker import start_trade_tracker
 from src.tasks.momentum_alerter import start_momentum_alerter
-from src.routers import api, health, frontend
+from src.routers import api, health, frontend, sse
 
 logger = setup_logger("main")
 settings = get_settings()
@@ -68,6 +68,7 @@ app = FastAPI(
 # Include routers
 app.include_router(api.router, prefix="/api", tags=["API"])
 app.include_router(frontend.router)  # Frontend has its own /api prefix
+app.include_router(sse.router)  # SSE streaming
 app.include_router(health.router, tags=["Health"])
 
 @app.get("/")
