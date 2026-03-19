@@ -22,7 +22,12 @@ async def start_scanner():
     
     while True:
         try:
-            await run_scan()
+            # Check if scanner is paused (via Telegram /pause command)
+            from src.bot.telegram import telegram_bot
+            if telegram_bot.scanner_paused:
+                logger.debug("Scanner paused, skipping scan")
+            else:
+                await run_scan()
         except Exception as e:
             logger.error(f"Scan error: {e}")
         

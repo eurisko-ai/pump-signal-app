@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     
     # Telegram
     telegram_bot_token: str = ""
-    telegram_group_id: int = 0
+    telegram_group_id: int = -5137818458  # Pump Signals group
     
     # FastAPI
     fastapi_host: str = "0.0.0.0"
