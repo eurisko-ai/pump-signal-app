@@ -1,0 +1,70 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: pump-signal-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-pump_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_here}
+      POSTGRES_DB: ${DB_NAME:-pump_signal}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pump_signal_db:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-pump_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pump_signal_network
+
+  app:
+    build: .
+    container_name: pump-signal-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-pump_signal}
+      DB_USER: ${DB_USER:-pump_user}
+      DB_PASSWORD: ${DB_PASSWORD:-secure_password_here}
+      MORALIS_API_KEY: ${MORALIS_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_GROUP_ID: ${TELEGRAM_GROUP_ID}
+      FASTAPI_HOST: 0.0.0.0
+      FASTAPI_PORT: 8000
+      FASTAPI_ENV: ${FASTAPI_ENV:-production}
+      SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-60}
+      ALERT_THRESHOLD: ${ALERT_THRESHOLD:-70}
+      MIN_MARKET_CAP: ${MIN_MARKET_CAP:-10000}
+      MIN_HOLDERS: ${MIN_HOLDERS:-50}
+      DEDUP_WINDOW_HOURS: ${DEDUP_WINDOW_HOURS:-6}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+      - ./migrations:/app/migrations
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pump_signal_network
+    restart: unless-stopped
+
+volumes:
+  pump_signal_db:
+    driver: local
+
+networks:
+  pump_signal_network:
+    driver: bridge
