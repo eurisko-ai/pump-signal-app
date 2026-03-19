@@ -8,8 +8,7 @@ services:
       POSTGRES_USER: ${DB_USER:-pump_user}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_here}
       POSTGRES_DB: ${DB_NAME:-pump_signal}
-    ports:
-      - "5432:5432"
+    # No port mapping - internal only
     volumes:
       - pump_signal_db:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql

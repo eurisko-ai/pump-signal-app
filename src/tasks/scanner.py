@@ -65,58 +65,54 @@ async def run_scan():
                 
                 logger.debug(f"{token.get('name')} ({ca}): score={score}")
                 
-                # Insert into DB
-                try:
-                    # Insert token
-                    token_id = await conn.fetchval(
+                # Insert token
+                token_id = await conn.fetchval(
+                    """
+                    INSERT INTO tokens (mint, name, symbol, description, market_cap, volume_24h, holders, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                    ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
+                    RETURNING id
+                    """,
+                    ca,
+                    token.get("name", ""),
+                    token.get("symbol", ""),
+                    token.get("description", ""),
+                    float(token.get("market_cap", 0)),
+                    float(token.get("volume_24h", 0)),
+                    int(token.get("holders", 0))
+                )
+                
+                # Insert signal
+                if score >= settings.alert_threshold:
+                    signal_id = await conn.fetchval(
                         """
-                        INSERT INTO tokens (mint, name, symbol, description, market_cap, volume_24h, holders, created_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                        ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
+                        INSERT INTO signals (token_id, score, status_score, market_cap_score, 
+                                            holders_score, volume_score, liquidity_score, age_penalty, 
+                                            whale_risk, narrative_score, narrative_type, risk_level)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                         RETURNING id
                         """,
-                        ca,
-                        token.get("name", ""),
-                        token.get("symbol", ""),
-                        token.get("description", ""),
-                        float(token.get("market_cap", 0)),
-                        float(token.get("volume_24h", 0)),
-                        int(token.get("holders", 0))
+                        token_id,
+                        score,
+                        breakdown.get("status", 0),
+                        breakdown.get("market_cap", 0),
+                        breakdown.get("holders", 0),
+                        breakdown.get("volume", 0),
+                        breakdown.get("liquidity", 0),
+                        breakdown.get("age_penalty", 0),
+                        breakdown.get("whale_risk", 0),
+                        breakdown.get("narrative", 0),
+                        breakdown.get("narrative_type", "Unknown"),
+                        breakdown.get("risk_level", "")
                     )
                     
-                    # Insert signal
-                    if score >= settings.alert_threshold:
-                        signal_id = await conn.fetchval(
-                            """
-                            INSERT INTO signals (token_id, score, status_score, market_cap_score, 
-                                                holders_score, volume_score, liquidity_score, age_penalty, 
-                                                whale_risk, narrative_score, narrative_type, risk_level)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                            RETURNING id
-                            """,
-                            token_id,
-                            score,
-                            breakdown.get("status", 0),
-                            breakdown.get("market_cap", 0),
-                            breakdown.get("holders", 0),
-                            breakdown.get("volume", 0),
-                            breakdown.get("liquidity", 0),
-                            breakdown.get("age_penalty", 0),
-                            breakdown.get("whale_risk", 0),
-                            breakdown.get("narrative", 0),
-                            breakdown.get("narrative_type", "Unknown"),
-                            breakdown.get("risk_level", "")
-                        )
-                        
-                        # Create alert
-                        await conn.execute(
-                            "INSERT INTO alerts (signal_id, status) VALUES ($1, 'posted')",
-                            signal_id
-                        )
-                        alerts_posted += 1
-                        logger.info(f"✅ ALERT: {token.get('name')} (score={score})")
-                        
-                        # TODO: Send to Telegram
+                    # Create alert
+                    await conn.execute(
+                        "INSERT INTO alerts (signal_id, status) VALUES ($1, 'posted')",
+                        signal_id
+                    )
+                    alerts_posted += 1
+                    logger.info(f"✅ ALERT: {token.get('name')} (score={score})")
                 
                 # Mark as seen
                 seen_tokens[ca] = datetime.utcnow()
