@@ -91,7 +91,7 @@ async def get_active_tokens():
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as latest_buy_event,
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1) as create_event,
                 (SELECT created_at FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as last_trade_at,
-                COALESCE((SELECT (raw_event->>'bondingCurve') FROM token_events WHERE token_id=t.id AND event_type IN ('buy', 'sell') AND raw_event ? 'bondingCurve' ORDER BY id DESC LIMIT 1), '') as bonding_curve_ca
+                COALESCE((SELECT (raw_event->>'bondingCurveKey') FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1), '') as bonding_curve_ca
             FROM tokens t
             WHERE t.mint LIKE '%pump' AND (SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type IN ('buy', 'sell')) > 0
             ORDER BY t.updated_at DESC
