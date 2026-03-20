@@ -218,8 +218,8 @@ async def _insert_token_and_signal(
             if token_id and raw_event_json:
                 await conn.execute(
                     """
-                    INSERT INTO token_events (token_id, event_type, raw_event)
-                    VALUES ($1, 'migration', $2::jsonb)
+                    INSERT INTO token_events (token_id, event_type, raw_event, created_at)
+                    VALUES ($1, 'migration', $2::jsonb, NOW())
                     """,
                     token_id,
                     raw_event_json,
@@ -511,8 +511,8 @@ async def _handle_create(event: Dict, sol_price: float):
             if token_id:
                 await conn.execute(
                     """
-                    INSERT INTO token_events (token_id, event_type, raw_event)
-                    VALUES ($1, 'create', $2::jsonb)
+                    INSERT INTO token_events (token_id, event_type, raw_event, created_at)
+                    VALUES ($1, 'create', $2::jsonb, NOW())
                     """,
                     token_id,
                     raw_event_json,
