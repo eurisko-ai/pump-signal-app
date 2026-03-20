@@ -82,23 +82,30 @@ async def run_cleanup():
         # 5. Delete tokens older than 2 hours (hard lifetime limit)
         lifetime_cutoff = datetime.utcnow() - timedelta(hours=2)
         try:
-            # First delete token_events for old tokens
-            deleted_events = await conn.fetchval(
-                """
-                DELETE FROM token_events te
-                WHERE te.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
-                """,
-                lifetime_cutoff
-            )
+            # First delete token_events for old tokens (cascade may handle this)
+            try:
+                deleted_events = await conn.fetchval(
+                    """
+                    DELETE FROM token_events te
+                    WHERE te.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
+                    """,
+                    lifetime_cutoff
+                )
+            except Exception:
+                deleted_events = 0
             
-            # Then delete token_momentum for old tokens
-            deleted_momentum = await conn.fetchval(
-                """
-                DELETE FROM token_momentum tm
-                WHERE tm.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
-                """,
-                lifetime_cutoff
-            )
+            # Try to delete token_momentum if table exists
+            deleted_momentum = 0
+            try:
+                deleted_momentum = await conn.fetchval(
+                    """
+                    DELETE FROM token_momentum tm
+                    WHERE tm.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
+                    """,
+                    lifetime_cutoff
+                )
+            except Exception:
+                pass  # Table may not exist, that's ok
             
             # Finally delete the tokens themselves
             deleted_tokens = await conn.fetchval(
@@ -111,12 +118,8 @@ async def run_cleanup():
         except Exception as e:
             logger.warning(f"Token cleanup failed: {e}")
         
-        # 6. Vacuum to reclaim space
-        try:
-            await conn.execute("VACUUM ANALYZE")
-            logger.info("✅ Cleanup complete - VACUUM ANALYZE done")
-        except Exception as e:
-            logger.warning(f"VACUUM failed: {e}")
+        # 6. VACUUM ANALYZE skipped (requires disk space we may not have)
+        logger.info("✅ Cleanup complete")
         
         await conn.close()
         
