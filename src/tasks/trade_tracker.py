@@ -135,12 +135,16 @@ class TradeTracker:
                             market_cap_usd, token_id
                         )
                     
+                    # Log every 50 updates
+                    if token_id % 50 == 0:
+                        logger.info(f"💰 Updated MC for {mint[:12]}... to ${market_cap_usd:.2f} ({market_cap_sol:.2f} SOL)")
+                    
                     # Broadcast market cap update via SSE
                     from src.routers.sse import broadcast_market_cap_update
                     await broadcast_market_cap_update(token_id, market_cap_usd)
                     
                 except Exception as e:
-                    logger.debug(f"Market cap update error for {mint[:16]}: {e}")
+                    logger.error(f"❌ Market cap update error for {mint[:16]}: {e}")
         except Exception as e:
             logger.error(f"Error processing trade for {mint}: {e}")
     
