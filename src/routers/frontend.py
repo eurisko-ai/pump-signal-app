@@ -85,7 +85,7 @@ async def get_active_tokens():
             """
             SELECT 
                 t.id, t.mint, t.name, t.symbol, t.image_url, t.market_cap, 
-                t.holders, t.created_at, t.description, t.raw_create_event,
+                t.holders, t.created_at, t.description, t.raw_create_event, t.bonding_curve_ca,
                 COALESCE((SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type='buy'), 0) as buy_count,
                 COALESCE((SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type='sell'), 0) as sell_count,
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as latest_buy_event,
@@ -281,6 +281,7 @@ async def get_active_tokens():
                 "holders": t["holders"] or 0,
                 "created_at": t["created_at"].isoformat() if t["created_at"] else datetime.utcnow().isoformat(),
                 "status": "migrated" if is_migrated else "active",
+                "bonding_curve_ca": t["bonding_curve_ca"] or "",
                 "bonding_curve_percent": round(bonding_pct, 1),
                 "dev_holding_percent": round(dev_pct, 2),
                 "top_holder_percent": round(top_holder_pct, 2),
