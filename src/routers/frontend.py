@@ -46,7 +46,7 @@ def compute_market_cap_usd(market_cap_sol: float, sol_price_usd: float = 140.0) 
 
 
 def compute_buy_sell_volume(conn_rows) -> dict:
-    """Compute buy/sell volume from token events."""
+    """Compute buy/sell volume from token events. solAmount is already in SOL (not lamports)."""
     buy_vol = 0.0
     sell_vol = 0.0
     buy_count = 0
@@ -54,7 +54,8 @@ def compute_buy_sell_volume(conn_rows) -> dict:
     for r in conn_rows:
         evt = r
         if isinstance(evt, dict):
-            amount = float(evt.get("solAmount", 0)) / 1e9 if evt.get("solAmount") else 0
+            amount = float(evt.get("solAmount", 0) or 0)
+            # solAmount is already in SOL units from pump.fun websocket
             if evt.get("txType") == "buy":
                 buy_vol += amount
                 buy_count += 1
