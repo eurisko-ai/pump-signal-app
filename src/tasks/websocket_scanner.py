@@ -342,7 +342,9 @@ async def _handle_migration(event: Dict, sol_price: float):
     mint = event.get("mint", "")
 
     # --- Filters ---
+    # STRICT: Only pump.fun tokens (CA must end with 'pump')
     if not mint.endswith("pump"):
+        logger.debug(f"REJECTED migration: {mint[:16]}... (not pump.fun — CA doesn't end with 'pump')")
         return
 
     if mint in seen_tokens:
@@ -421,7 +423,9 @@ async def _handle_migration(event: Dict, sol_price: float):
 async def _handle_create(event: Dict, sol_price: float):
     """Log new token creation to DB for tracking. No alert."""
     mint = event.get("mint", "")
+    # STRICT: Only pump.fun tokens (CA must end with 'pump')
     if not mint.endswith("pump"):
+        logger.debug(f"REJECTED create: {mint[:16]}... (not pump.fun — CA doesn't end with 'pump')")
         return
 
     creator = event.get("traderPublicKey", "")

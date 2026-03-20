@@ -24,6 +24,7 @@ async def get_signals(limit: int = Query(50, ge=1, le=1000), offset: int = Query
                    t.name, t.symbol, t.mint, t.market_cap
             FROM signals s
             JOIN tokens t ON s.token_id = t.id
+            WHERE t.mint LIKE '%pump'
             ORDER BY s.score DESC
             LIMIT $1 OFFSET $2
             """,
@@ -51,6 +52,7 @@ async def get_top_signals(limit: int = Query(10, ge=1, le=100)):
             FROM signals s
             JOIN tokens t ON s.token_id = t.id
             WHERE s.created_at > NOW() - INTERVAL '1 hour'
+              AND t.mint LIKE '%pump'
             ORDER BY s.score DESC
             LIMIT $1
             """,
@@ -75,6 +77,7 @@ async def get_tokens(limit: int = Query(50, ge=1, le=1000), offset: int = Query(
             """
             SELECT id, mint, name, symbol, market_cap, volume_24h, holders, created_at
             FROM tokens
+            WHERE mint LIKE '%pump'
             ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
             """,

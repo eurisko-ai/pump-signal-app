@@ -58,6 +58,7 @@ async def get_active_tokens():
         logger.info("Getting active tokens with full metrics...")
 
         # Get tokens with buy/sell counts and latest event data
+        # STRICT: Only pump.fun tokens (CA ends with 'pump')
         tokens = await conn.fetch(
             """
             SELECT 
@@ -69,6 +70,7 @@ async def get_active_tokens():
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1) as create_event,
                 (SELECT created_at FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as last_trade_at
             FROM tokens t
+            WHERE t.mint LIKE '%pump'
             ORDER BY t.created_at DESC
             LIMIT 500
             """
@@ -289,6 +291,7 @@ async def get_signal_history(
             SELECT s.id, s.token_id, s.created_at, t.name, t.symbol, t.mint, s.score
             FROM signals s
             JOIN tokens t ON s.token_id = t.id
+            WHERE t.mint LIKE '%pump'
             ORDER BY s.created_at DESC
             LIMIT $1
             """,
@@ -329,6 +332,7 @@ async def get_active_signals():
             FROM signals s
             JOIN tokens t ON s.token_id = t.id
             WHERE s.score >= $1 AND s.created_at > NOW() - INTERVAL '1 hour'
+              AND t.mint LIKE '%pump'
             ORDER BY s.created_at DESC
             LIMIT 50
             """,
@@ -369,31 +373,30 @@ async def get_dashboard_stats():
     try:
         conn = await get_db()
 
-        total_tokens = await conn.fetchval("SELECT COUNT(*) FROM tokens")
+        # STRICT: Only pump.fun tokens (CA ends with 'pump')
+        total_tokens = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE mint LIKE '%pump'")
 
-        # Count tokens with high bonding curve (>80%)
-        # We'll estimate from events
         good_signals = await conn.fetchval(
-            "SELECT COUNT(*) FROM signals WHERE score >= $1",
+            "SELECT COUNT(*) FROM signals s JOIN tokens t ON s.token_id = t.id WHERE s.score >= $1 AND t.mint LIKE '%pump'",
             settings.alert_threshold
         )
 
         today = datetime.utcnow().date()
         signals_today = await conn.fetchval(
-            "SELECT COUNT(*) FROM signals WHERE DATE(created_at) = $1",
+            "SELECT COUNT(*) FROM signals s JOIN tokens t ON s.token_id = t.id WHERE DATE(s.created_at) = $1 AND t.mint LIKE '%pump'",
             today
         )
 
         fifteen_mins_ago = datetime.utcnow() - timedelta(minutes=15)
         new_pairs_15m = await conn.fetchval(
-            "SELECT COUNT(*) FROM tokens WHERE created_at > $1",
+            "SELECT COUNT(*) FROM tokens WHERE created_at > $1 AND mint LIKE '%pump'",
             fifteen_mins_ago
         )
 
         # Count tokens created in last hour
         one_hour_ago = datetime.utcnow() - timedelta(hours=1)
         graduated_1h = await conn.fetchval(
-            "SELECT COUNT(*) FROM tokens WHERE created_at > $1",
+            "SELECT COUNT(*) FROM tokens WHERE created_at > $1 AND mint LIKE '%pump'",
             one_hour_ago
         )
 
@@ -422,6 +425,7 @@ async def get_token_stats():
         conn = await get_db()
 
         # Fetch all tokens with the same scoring logic as /tokens/active
+        # STRICT: Only pump.fun tokens (CA ends with 'pump')
         tokens = await conn.fetch(
             """
             SELECT 
@@ -432,6 +436,7 @@ async def get_token_stats():
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as latest_buy_event,
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1) as create_event
             FROM tokens t
+            WHERE t.mint LIKE '%pump'
             ORDER BY t.created_at DESC
             LIMIT 500
             """
