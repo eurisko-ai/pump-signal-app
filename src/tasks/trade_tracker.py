@@ -150,18 +150,30 @@ class TradeTracker:
     
     async def listen(self):
         """Listen for trade events from WebSocket"""
+        msg_count = 0
         while self.running:
             try:
                 async for message in self.websocket:
+                    msg_count += 1
                     try:
                         event = json.loads(message)
-                        await self.on_trade_event(event)
+                        # Log every 100 messages to see if we're receiving anything
+                        if msg_count % 100 == 0:
+                            logger.info(f"📬 Trade tracker received {msg_count} messages, last keys: {list(event.keys())}")
+                        
+                        # Check if this is a trade event
+                        if event.get("mint") and event.get("txType"):
+                            logger.info(f"🔄 Trade event: {event.get('mint')[:12]}... {event.get('txType')} {event.get('solAmount', 0)} SOL")
+                            await self.on_trade_event(event)
+                        elif event.get("mint") and msg_count % 500 == 0:
+                            logger.debug(f"Non-trade msg for {event.get('mint')[:12]}...: {list(event.keys())}")
                     except json.JSONDecodeError:
                         pass
                     except Exception as e:
                         logger.error(f"Error in trade listener: {e}")
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("Trade tracker connection closed. Reconnecting...")
+                msg_count = 0
                 await self.connect()
             except Exception as e:
                 logger.error(f"Trade tracker listener error: {e}")
