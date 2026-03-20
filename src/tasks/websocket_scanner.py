@@ -94,17 +94,36 @@ async def _fetch_token_image_url(mint: str) -> Optional[str]:
     return None
 
 
+async def _resolve_metadata_uri(uri: str) -> Optional[str]:
+    """
+    Fetch a metadata URI (IPFS/HTTP JSON) and extract the 'image' field.
+    PumpPortal 'uri' fields point to JSON metadata containing the actual image URL.
+    """
+    if not uri or not isinstance(uri, str) or not uri.startswith("http"):
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                image_url = data.get("image") or data.get("image_url") or data.get("imageUrl")
+                if image_url and isinstance(image_url, str) and image_url.startswith("http"):
+                    logger.debug(f"Resolved metadata URI → image: {image_url[:80]}")
+                    return image_url
+    except Exception as e:
+        logger.debug(f"Metadata URI resolution failed for {uri[:60]}: {e}")
+    return None
+
+
 def _extract_image_from_event(event: Dict) -> Optional[str]:
-    """Extract image URL from PumpPortal WebSocket event data if present."""
-    # PumpPortal events may include image/uri fields
-    image_url = event.get("image_uri") or event.get("uri") or event.get("image") or event.get("imageUri")
+    """Extract direct image URL from PumpPortal WebSocket event data if present.
+    Note: The 'uri' field is a metadata URI (JSON), NOT a direct image URL.
+    Use _resolve_metadata_uri() to get the actual image from 'uri'."""
+    # Check for direct image URL fields (not 'uri' which is metadata JSON)
+    image_url = event.get("image_uri") or event.get("image") or event.get("imageUri") or event.get("image_url")
     if image_url and isinstance(image_url, str) and image_url.startswith("http"):
         return image_url
-    # Check metadata/uri field (IPFS gateway URLs)
-    metadata_uri = event.get("metadataUri") or event.get("metadata_uri")
-    if metadata_uri and isinstance(metadata_uri, str):
-        # Don't resolve IPFS metadata here - too slow for real-time
-        pass
     return None
 
 
@@ -324,6 +343,12 @@ async def _handle_migration(event: Dict, sol_price: float):
     # --- Fetch image URL (non-blocking, best-effort) ---
     image_url = _extract_image_from_event(event)
     if not image_url:
+        # Try resolving metadata URI first (fast, direct)
+        metadata_uri = event.get("uri")
+        if metadata_uri:
+            image_url = await _resolve_metadata_uri(metadata_uri)
+    if not image_url:
+        # Fallback to DexScreener API
         try:
             image_url = await _fetch_token_image_url(mint)
         except Exception:
@@ -384,8 +409,12 @@ async def _handle_create(event: Dict, sol_price: float):
 
     token = _build_token_dict_from_create(event, sol_price)
     
-    # Extract image URL from event (fast, no API call for creates to avoid rate limits)
+    # Extract image URL: first try direct fields, then resolve metadata URI
     image_url = _extract_image_from_event(event)
+    if not image_url:
+        metadata_uri = event.get("uri")
+        if metadata_uri:
+            image_url = await _resolve_metadata_uri(metadata_uri)
     token["image_url"] = image_url
 
     # Insert token + start tracking trades (Phase 2: pre-migration momentum)

@@ -1,6 +1,9 @@
-"""One-time backfill of image URLs for existing tokens missing them.
+"""Backfill image URLs for existing tokens.
 
-Runs once on startup, fetches from DexScreener API with rate limiting.
+1. Fix tokens with metadata URIs stored as image_url (resolve to actual image)
+2. Fill NULL image_url from DexScreener API
+
+Runs once on startup with rate limiting.
 """
 import asyncio
 import asyncpg
@@ -10,6 +13,48 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger("image_backfill")
 settings = get_settings()
+
+
+async def _resolve_metadata_uri(uri: str) -> str | None:
+    """Fetch metadata JSON and extract the 'image' field."""
+    if not uri or not uri.startswith("http"):
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                image_url = data.get("image") or data.get("image_url") or data.get("imageUrl")
+                if image_url and isinstance(image_url, str) and image_url.startswith("http"):
+                    return image_url
+    except Exception as e:
+        logger.debug(f"Metadata resolve failed for {uri[:60]}: {e}")
+    return None
+
+
+def _is_metadata_uri(url: str) -> bool:
+    """Check if a URL looks like a metadata URI (JSON) rather than an image."""
+    if not url:
+        return False
+    # Common metadata URI patterns (not direct images)
+    metadata_patterns = [
+        ".json",
+        "/ipfs/Qm",       # IPFS CIDv0 (typically metadata JSON)
+        "/ipfs/bafkrei",   # IPFS CIDv1 (could be either, check content-type)
+        "meta.uxento.io",
+        "metadata.rapidlaunch.io",
+        "arweave.net",
+    ]
+    # Direct image patterns
+    image_patterns = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
+    
+    url_lower = url.lower()
+    # If it's clearly an image file, it's not metadata
+    if any(url_lower.endswith(ext) for ext in image_patterns):
+        return False
+    # If it matches metadata patterns, likely metadata
+    return any(p in url_lower for p in metadata_patterns)
 
 
 async def _fetch_image_from_dexscreener(mint: str) -> str | None:
@@ -31,22 +76,46 @@ async def _fetch_image_from_dexscreener(mint: str) -> str | None:
 
 
 async def backfill_token_images():
-    """Backfill image URLs for tokens that don't have one yet."""
+    """Backfill image URLs for tokens that need fixing."""
     try:
         conn = await asyncpg.connect(settings.database_url)
-        tokens = await conn.fetch(
+        
+        # Phase 1: Fix tokens with metadata URIs stored as image_url
+        all_tokens_with_images = await conn.fetch(
+            "SELECT id, mint, image_url FROM tokens WHERE image_url IS NOT NULL ORDER BY created_at DESC LIMIT 200"
+        )
+        
+        metadata_tokens = [t for t in all_tokens_with_images if _is_metadata_uri(t["image_url"])]
+        
+        if metadata_tokens:
+            logger.info(f"Phase 1: Resolving {len(metadata_tokens)} metadata URIs to actual images...")
+            resolved = 0
+            for t in metadata_tokens:
+                real_image = await _resolve_metadata_uri(t["image_url"])
+                if real_image:
+                    await conn.execute(
+                        "UPDATE tokens SET image_url = $1, updated_at = NOW() WHERE id = $2",
+                        real_image, t["id"]
+                    )
+                    resolved += 1
+                    logger.debug(f"Resolved token {t['id']}: {real_image[:60]}")
+                await asyncio.sleep(0.3)  # Rate limit metadata fetches
+            logger.info(f"Phase 1 complete: {resolved}/{len(metadata_tokens)} metadata URIs resolved")
+        
+        # Phase 2: Fill NULL image_url from DexScreener
+        null_tokens = await conn.fetch(
             "SELECT id, mint FROM tokens WHERE image_url IS NULL ORDER BY created_at DESC LIMIT 100"
         )
         await conn.close()
 
-        if not tokens:
-            logger.info("No tokens need image backfill")
+        if not null_tokens:
+            logger.info("Phase 2: No tokens need DexScreener image backfill")
             return
 
-        logger.info(f"Backfilling images for {len(tokens)} tokens...")
+        logger.info(f"Phase 2: Backfilling images for {len(null_tokens)} tokens from DexScreener...")
         updated = 0
 
-        for t in tokens:
+        for t in null_tokens:
             image_url = await _fetch_image_from_dexscreener(t["mint"])
             if image_url:
                 try:
@@ -64,7 +133,7 @@ async def backfill_token_images():
             # Rate limit: DexScreener allows ~300 req/min, be conservative
             await asyncio.sleep(1)
 
-        logger.info(f"Image backfill complete: {updated}/{len(tokens)} tokens updated")
+        logger.info(f"Phase 2 complete: {updated}/{len(null_tokens)} tokens updated from DexScreener")
 
     except Exception as e:
         logger.error(f"Image backfill failed: {e}", exc_info=True)
