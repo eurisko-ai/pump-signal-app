@@ -2,6 +2,12 @@
 from alembic import op
 import sqlalchemy as sa
 
+# revision identifiers, used by Alembic
+revision = '007'
+down_revision = '006'
+branch_labels = None
+depends_on = None
+
 
 def upgrade():
     # Extract bondingCurve from raw_create_event JSONB and update bonding_curve_ca
