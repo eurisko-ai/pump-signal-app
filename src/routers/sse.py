@@ -11,32 +11,71 @@ logger = setup_logger("sse")
 
 router = APIRouter(prefix="/api", tags=["SSE"])
 
-# Global list of active SSE clients
-sse_clients = []
+# Global event queue for market cap updates (consumed by all SSE streams)
+_mc_update_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+
+async def broadcast_market_cap_update(token_id: int, market_cap_usd: float):
+    """Push a market cap update to all SSE clients via shared queue."""
+    try:
+        _mc_update_queue.put_nowait({
+            "type": "market_cap_update",
+            "token_id": token_id,
+            "market_cap": market_cap_usd,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+    except asyncio.QueueFull:
+        # Drop oldest if queue is full
+        try:
+            _mc_update_queue.get_nowait()
+            _mc_update_queue.put_nowait({
+                "type": "market_cap_update",
+                "token_id": token_id,
+                "market_cap": market_cap_usd,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        except Exception:
+            pass
+
 
 async def token_update_stream():
     """Stream real-time token updates via SSE"""
     last_token_ids = set()
+    tick = 0
     
     try:
         while True:
-            # Get current active tokens
-            current_token_ids = set(momentum_engine.token_trades.keys()) if hasattr(momentum_engine, 'token_trades') else set()
+            # Get current active tokens from momentum engine's internal buffers
+            current_token_ids = set(momentum_engine._buffers.keys())
+            
+            # Log status every 5 ticks
+            if tick % 5 == 0:
+                logger.info(f"SSE tick {tick}: {len(current_token_ids)} tokens in momentum engine")
             
             # Detect new tokens
             new_tokens = current_token_ids - last_token_ids
             
             if new_tokens:
+                logger.info(f"SSE: {len(new_tokens)} new tokens detected")
                 for token_id in new_tokens:
-                    yield f"data: {json.dumps({'type': 'token_new', 'token_id': token_id})}\n\n"
+                    yield f"data: {json.dumps({'type': 'token_new', 'token_id': token_id, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
             
-            # Update metrics for all active tokens
-            for token_id in current_token_ids:
-                metrics = momentum_engine.get_all_metrics(token_id)
-                if metrics:
-                    yield f"data: {json.dumps({'type': 'metrics_update', 'token_id': token_id, 'metrics': metrics, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+            # Drain market cap update queue
+            mc_updates = {}
+            while not _mc_update_queue.empty():
+                try:
+                    update = _mc_update_queue.get_nowait()
+                    # Keep only latest per token_id
+                    mc_updates[update["token_id"]] = update
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Send batched market cap updates
+            for update in mc_updates.values():
+                yield f"data: {json.dumps(update)}\n\n"
             
             last_token_ids = current_token_ids
+            tick += 1
             
             # Send every 1 second
             await asyncio.sleep(1)
@@ -44,7 +83,7 @@ async def token_update_stream():
     except asyncio.CancelledError:
         logger.info("SSE stream cancelled")
     except Exception as e:
-        logger.error(f"SSE error: {e}")
+        logger.error(f"SSE error: {e}", exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
 @router.get("/stream")

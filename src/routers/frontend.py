@@ -19,28 +19,21 @@ async def get_db():
 # ============================================================================
 @router.get("/tokens/active")
 async def get_active_tokens():
-    """Get all active/recently created tokens"""
+    """Get all tokens (ordered by newest) with image_url and market_cap"""
     try:
         conn = await get_db()
-        
-        # Get tokens created in last 2 hours
-        two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+        logger.info("Getting active tokens...")
         
         tokens = await conn.fetch(
             """
-            SELECT id, mint, name, symbol, created_at,
-                   CASE 
-                       WHEN created_at < NOW() - INTERVAL '2 minutes' THEN 'migrated'
-                       ELSE 'detecting'
-                   END as status
+            SELECT id, mint, name, symbol, image_url, market_cap, created_at
             FROM tokens
-            WHERE created_at > $1
             ORDER BY created_at DESC
             LIMIT 50
-            """,
-            two_hours_ago
+            """
         )
         
+        logger.info(f"Found {len(tokens)} tokens")
         await conn.close()
         
         return [
@@ -49,14 +42,15 @@ async def get_active_tokens():
                 "mint": t["mint"],
                 "name": t["name"],
                 "symbol": t["symbol"],
-                "created_at": t["created_at"].isoformat(),
-                "status": t["status"]
+                "image_url": t["image_url"],
+                "market_cap": t["market_cap"],
+                "status": "active"
             }
             for t in tokens
         ]
     except Exception as e:
-        logger.error(f"Error fetching active tokens: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching active tokens: {e}", exc_info=True)
+        return {"error": str(e)}
 
 # ============================================================================
 # TOKEN METRICS

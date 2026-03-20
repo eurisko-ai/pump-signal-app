@@ -16,9 +16,12 @@ import asyncpg
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidURI, InvalidHandshake
 
+import aiohttp
+
 from src.config import get_settings
 from src.services.scoring import scoring
 from src.services.telegram_service import TelegramService
+from src.services.momentum_engine import momentum_engine
 from src.tasks.trade_tracker import trade_tracker
 from src.utils.logger import setup_logger
 
@@ -55,6 +58,54 @@ _stats = {
     "alerts_posted": 0,
     "last_event_at": None,
 }
+
+
+# ---------------------------------------------------------------------------
+# Token Image URL
+# ---------------------------------------------------------------------------
+async def _fetch_token_image_url(mint: str) -> Optional[str]:
+    """
+    Try to get token image URL from DexScreener API.
+    Returns image URL or None.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                pairs = data.get("pairs") or []
+                if pairs:
+                    # Get image from first pair's token info
+                    info = pairs[0].get("info", {})
+                    image_url = info.get("imageUrl")
+                    if image_url:
+                        logger.debug(f"Got image URL from DexScreener for {mint[:16]}: {image_url}")
+                        return image_url
+                    # Try baseToken header
+                    base_token = pairs[0].get("baseToken", {})
+                    # Some pairs have logo in header
+                    header = info.get("header")
+                    if header:
+                        return header
+    except Exception as e:
+        logger.debug(f"DexScreener image fetch failed for {mint[:16]}: {e}")
+    return None
+
+
+def _extract_image_from_event(event: Dict) -> Optional[str]:
+    """Extract image URL from PumpPortal WebSocket event data if present."""
+    # PumpPortal events may include image/uri fields
+    image_url = event.get("image_uri") or event.get("uri") or event.get("image") or event.get("imageUri")
+    if image_url and isinstance(image_url, str) and image_url.startswith("http"):
+        return image_url
+    # Check metadata/uri field (IPFS gateway URLs)
+    metadata_uri = event.get("metadataUri") or event.get("metadata_uri")
+    if metadata_uri and isinstance(metadata_uri, str):
+        # Don't resolve IPFS metadata here - too slow for real-time
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +160,14 @@ async def _insert_token_and_signal(
             # Upsert token
             token_id = await conn.fetchval(
                 """
-                INSERT INTO tokens (mint, name, symbol, description, market_cap,
+                INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
                                     volume_24h, holders, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                 ON CONFLICT (mint) DO UPDATE SET
                     market_cap = EXCLUDED.market_cap,
                     volume_24h = EXCLUDED.volume_24h,
                     holders = EXCLUDED.holders,
+                    image_url = COALESCE(EXCLUDED.image_url, tokens.image_url),
                     updated_at = NOW()
                 RETURNING id
                 """,
@@ -123,13 +175,17 @@ async def _insert_token_and_signal(
                 token.get("name", ""),
                 token.get("symbol", ""),
                 token.get("description", ""),
+                token.get("image_url"),
                 float(token.get("market_cap", 0)),
                 float(token.get("volume_24h", 0)),
                 int(token.get("holders", 0)),
             )
 
-            if score < settings.alert_threshold:
-                return None  # token logged, no signal needed
+            # Always return token_id (for momentum tracking), but only create signal if score meets threshold
+            if score >= settings.alert_threshold:
+                logger.debug(f"Score {score} >= threshold {settings.alert_threshold}, creating signal")
+            else:
+                logger.debug(f"Score {score} < threshold {settings.alert_threshold}, token logged only (momentum tracking will follow)")
 
             signal_id = await conn.fetchval(
                 """
@@ -264,6 +320,16 @@ async def _handle_migration(event: Dict, sol_price: float):
 
     # --- Build token data ---
     token = _build_token_dict_from_migration(event, sol_price)
+    
+    # --- Fetch image URL (non-blocking, best-effort) ---
+    image_url = _extract_image_from_event(event)
+    if not image_url:
+        try:
+            image_url = await _fetch_token_image_url(mint)
+        except Exception:
+            pass
+    token["image_url"] = image_url
+    
     market_cap = token["market_cap"]
 
     if market_cap < settings.min_market_cap:
@@ -293,8 +359,11 @@ async def _handle_migration(event: Dict, sol_price: float):
                     "SELECT id FROM tokens WHERE mint = $1", mint
                 )
             if token_id:
+                # Register with momentum engine FIRST (creates buffer for trades)
+                momentum_engine.register_token(token_id, mint, is_migrated=True)
+                # Then start tracking trades
                 await trade_tracker.track_token(mint, token_id)
-                logger.info(f"📊 Trade tracker monitoring {token['name']} post-migration")
+                logger.info(f"📊 Trade tracker + Momentum engine monitoring {token['name']} post-migration")
         except Exception as e:
             logger.debug(f"Trade tracker registration error: {e}")
 
@@ -314,6 +383,10 @@ async def _handle_create(event: Dict, sol_price: float):
         return
 
     token = _build_token_dict_from_create(event, sol_price)
+    
+    # Extract image URL from event (fast, no API call for creates to avoid rate limits)
+    image_url = _extract_image_from_event(event)
+    token["image_url"] = image_url
 
     # Insert token + start tracking trades (Phase 2: pre-migration momentum)
     try:
@@ -321,9 +394,9 @@ async def _handle_create(event: Dict, sol_price: float):
         async with pool.acquire() as conn:
             token_id = await conn.fetchval(
                 """
-                INSERT INTO tokens (mint, name, symbol, description, market_cap,
+                INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
                                     volume_24h, holders, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                 ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
                 RETURNING id
                 """,
@@ -331,13 +404,22 @@ async def _handle_create(event: Dict, sol_price: float):
                 token.get("name", ""),
                 token.get("symbol", ""),
                 "",
+                token.get("image_url"),
                 float(token.get("market_cap", 0)),
                 0,
                 1,
             )
         # Phase 2: Track trades from creation to detect pre-migration momentum
         if token_id:
-            track_token(token_id, token["mint"], is_migrated=False)
+            try:
+                # Register with momentum engine FIRST (creates buffer for trades)
+                momentum_engine.register_token(token_id, token["mint"], is_migrated=False)
+                logger.info(f"📈 Registered {token['name']} with momentum engine (token_id={token_id})")
+                # Then start tracking trades
+                await trade_tracker.track_token(token["mint"], token_id)
+                logger.info(f"🔍 Momentum tracking for {token['name']} (pre-migration)")
+            except Exception as e:
+                logger.error(f"Error registering momentum tracking: {e}", exc_info=True)
     except Exception as e:
         logger.debug(f"Create insert error (non-critical): {e}")
 
@@ -359,9 +441,15 @@ async def _process_event(raw: str, sol_price: float):
     tx_type = event.get("txType", "")
 
     if tx_type == "migration":
+        mint = event.get("mint", "")[:16]
+        logger.debug(f"EVENT: Migration {mint}...")
         await _handle_migration(event, sol_price)
     elif tx_type == "create":
+        mint = event.get("mint", "")[:16]
+        logger.debug(f"EVENT: Create {mint}...")
         await _handle_create(event, sol_price)
+    elif tx_type:
+        _stats["events_other"] += 1
     # Other tx types (buy/sell/etc.) are ignored
 
 

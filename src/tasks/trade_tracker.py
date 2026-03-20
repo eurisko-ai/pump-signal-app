@@ -2,6 +2,7 @@
 import asyncio
 import json
 import websockets
+import asyncpg
 from typing import Dict, Set, Optional
 from datetime import datetime
 from src.config import get_settings
@@ -13,6 +14,16 @@ settings = get_settings()
 
 PUMPPORTAL_WS_URI = getattr(settings, "pumpportal_ws_uri", "wss://pumpportal.fun/api/data")
 WS_RECONNECT_MAX_DELAY = getattr(settings, "ws_reconnect_max_delay", 30)
+
+# Module-level DB pool for market cap updates
+_trade_db_pool: Optional[asyncpg.Pool] = None
+
+async def _get_trade_db_pool() -> asyncpg.Pool:
+    """Lazy-init DB pool for trade tracker."""
+    global _trade_db_pool
+    if _trade_db_pool is None or _trade_db_pool._closed:
+        _trade_db_pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    return _trade_db_pool
 
 class TradeTracker:
     """Manage dynamic per-token trade subscriptions"""
@@ -70,7 +81,7 @@ class TradeTracker:
         logger.info(f"⏹️ Untracked {mint[:16]}... (idle or max capacity)")
     
     async def on_trade_event(self, event: dict):
-        """Handle incoming trade event"""
+        """Handle incoming trade event — feeds momentum engine + updates market cap in DB"""
         mint = event.get("mint", "")
         if mint not in self.tracked_tokens:
             return
@@ -79,11 +90,37 @@ class TradeTracker:
         
         try:
             amount_sol = float(event.get("solAmount", 0))
-            is_buy = event.get("txType", "").lower() == "buy"
-            is_whale = amount_sol > 0.5  # >0.5 SOL = whale
+            direction = "buy" if event.get("txType", "").lower() == "buy" else "sell"
+            trader = event.get("traderPublicKey", "unknown")
+            timestamp = datetime.utcnow()
             
             # Add to momentum engine
-            momentum_engine.add_trade(token_id, amount_sol, is_buy, is_whale)
+            momentum_engine.add_trade(token_id, trader, amount_sol, direction, timestamp)
+            
+            # Update market cap in DB if present in event
+            market_cap_sol = event.get("marketCapSol")
+            if market_cap_sol is not None:
+                try:
+                    market_cap_sol = float(market_cap_sol)
+                    # Get SOL price from the websocket scanner's cache
+                    from src.tasks.websocket_scanner import _sol_price_usd
+                    sol_price = _sol_price_usd if _sol_price_usd > 0 else 140.0
+                    market_cap_usd = market_cap_sol * sol_price
+                    
+                    # Update DB (fire-and-forget, batched via pool)
+                    pool = await _get_trade_db_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE tokens SET market_cap = $1, updated_at = NOW() WHERE id = $2",
+                            market_cap_usd, token_id
+                        )
+                    
+                    # Broadcast market cap update via SSE
+                    from src.routers.sse import broadcast_market_cap_update
+                    await broadcast_market_cap_update(token_id, market_cap_usd)
+                    
+                except Exception as e:
+                    logger.debug(f"Market cap update error for {mint[:16]}: {e}")
         except Exception as e:
             logger.error(f"Error processing trade for {mint}: {e}")
     

@@ -20,6 +20,7 @@ class Token(Base):
     name = Column(String(255), nullable=False)
     symbol = Column(String(50), nullable=False)
     description = Column(Text, nullable=True)
+    image_url = Column(Text, nullable=True)
     market_cap = Column(Float, nullable=True)
     volume_24h = Column(Float, nullable=True)
     holders = Column(Integer, nullable=True)
