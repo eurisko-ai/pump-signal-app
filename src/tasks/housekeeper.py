@@ -79,15 +79,37 @@ async def run_cleanup():
         except Exception as e:
             logger.warning(f"signals cleanup failed: {e}")
         
-        # 5. Keep tokens forever (they're the source data), but log inactive ones
+        # 5. Delete tokens older than 2 hours (hard lifetime limit)
+        lifetime_cutoff = datetime.utcnow() - timedelta(hours=2)
         try:
-            inactive_tokens = await conn.fetchval(
-                "SELECT COUNT(*) FROM tokens t WHERE t.updated_at < $1",
-                cutoff_time
+            # First delete token_events for old tokens
+            deleted_events = await conn.fetchval(
+                """
+                DELETE FROM token_events te
+                WHERE te.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
+                """,
+                lifetime_cutoff
             )
-            logger.info(f"Inactive tokens (no recent signals): {inactive_tokens or 0}")
+            
+            # Then delete token_momentum for old tokens
+            deleted_momentum = await conn.fetchval(
+                """
+                DELETE FROM token_momentum tm
+                WHERE tm.token_id IN (SELECT id FROM tokens WHERE created_at < $1)
+                """,
+                lifetime_cutoff
+            )
+            
+            # Finally delete the tokens themselves
+            deleted_tokens = await conn.fetchval(
+                "DELETE FROM tokens WHERE created_at < $1",
+                lifetime_cutoff
+            )
+            
+            if deleted_tokens:
+                logger.info(f"🗑️ Deleted {deleted_tokens} old tokens (>2h lifetime) + {deleted_events or 0} events + {deleted_momentum or 0} momentum records")
         except Exception as e:
-            logger.warning(f"Token stats failed: {e}")
+            logger.warning(f"Token cleanup failed: {e}")
         
         # 6. Vacuum to reclaim space
         try:

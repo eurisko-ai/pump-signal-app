@@ -29,9 +29,9 @@ logger = setup_logger("momentum_engine")
 # Constants
 # ---------------------------------------------------------------------------
 WHALE_THRESHOLD_SOL = 0.5       # ≥0.5 SOL = whale trade
-MAX_TRACKED_TOKENS = 200        # LRU cap
-TRADE_WINDOW_SECONDS = 120      # Keep 2 min of trades in memory
-STALE_TIMEOUT_SECONDS = 300     # Drop token after 5 min silence
+MAX_TRACKED_TOKENS = 150        # LRU cap (reduced to save memory)
+TRADE_WINDOW_SECONDS = 60       # Keep 1 min of trades in memory (reduced from 2)
+STALE_TIMEOUT_SECONDS = 180     # Drop token after 3 min silence (reduced from 5)
 DB_FLUSH_INTERVAL = 10          # Flush to DB every 10 seconds
 
 # Momentum trigger thresholds

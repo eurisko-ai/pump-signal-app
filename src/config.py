@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     min_holders: int = 50
     dedup_window_hours: int = 6
     
-    # Housekeeper (cleanup)
-    data_retention_hours: int = 8
-    housekeeper_interval_minutes: int = 60
+    # Housekeeper (cleanup) — reduced to prevent memory bloat
+    data_retention_hours: int = 2
+    housekeeper_interval_minutes: int = 15
     
     # Logging
     log_level: str = "INFO"
