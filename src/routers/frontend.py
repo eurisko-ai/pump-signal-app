@@ -90,8 +90,7 @@ async def get_active_tokens():
                 COALESCE((SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type='sell'), 0) as sell_count,
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as latest_buy_event,
                 (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1) as create_event,
-                (SELECT created_at FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as last_trade_at,
-                COALESCE((SELECT (raw_event->>'marketCapSol')::FLOAT FROM token_events WHERE token_id=t.id AND (event_type='buy' OR event_type='sell') AND raw_event ? 'marketCapSol' ORDER BY id DESC LIMIT 1), NULL) as latest_mc_sol
+                (SELECT created_at FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as last_trade_at
             FROM tokens t
             WHERE t.mint LIKE '%pump'
             ORDER BY t.updated_at DESC
@@ -149,9 +148,12 @@ async def get_active_tokens():
             v_sol = latest_buy.get("vSolInBondingCurve") or create_event.get("vSolInBondingCurve", 0)
             bonding_pct = compute_bonding_curve_percent(v_sol)
             dev_pct = compute_dev_holding_percent(create_event)
-            # Use latest MC from trade event if available, otherwise fall back to event data
-            mc_sol = t.get("latest_mc_sol") or latest_buy.get("marketCapSol") or create_event.get("marketCapSol", 0)
-            mc_usd = compute_market_cap_usd(mc_sol)
+            # Market cap in USD is stored in DB and updated with every trade
+            mc_usd = t.get("market_cap") or 0
+            # Convert back to SOL for display (using current SOL price)
+            from src.tasks.websocket_scanner import _sol_price_usd
+            sol_price = _sol_price_usd if _sol_price_usd > 0 else 140.0
+            mc_sol = mc_usd / sol_price if mc_usd > 0 else 0
             mc_initial_sol = create_event.get("marketCapSol", 0)
             mc_initial_usd = compute_market_cap_usd(mc_initial_sol)
 
