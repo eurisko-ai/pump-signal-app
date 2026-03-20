@@ -107,15 +107,15 @@ class TradeTracker:
                 async with pool.acquire() as conn:
                     await conn.execute(
                         """
-                        INSERT INTO token_events (token_id, event_type, raw_event)
-                        VALUES ($1, $2, $3::jsonb)
+                        INSERT INTO token_events (token_id, event_type, raw_event, created_at)
+                        VALUES ($1, $2, $3::jsonb, NOW())
                         """,
                         token_id,
                         event_type,
                         raw_event_json,
                     )
             except Exception as e:
-                logger.debug(f"Raw event storage error for {mint[:16]}: {e}")
+                logger.error(f"❌ Raw event storage error for {mint[:16]}: {e}")
             
             # Update market cap in DB if present in event
             market_cap_sol = event.get("marketCapSol")
