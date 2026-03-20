@@ -63,10 +63,22 @@ class TelegramService:
         else:
             vol_str = f"${volume_24h:.0f}"
         
+        # DexScreener verification badge
+        dex_verified = breakdown.get("dexscreener_verified", False)
+        dex_has_profile = breakdown.get("dexscreener_has_profile", False)
+        dex_score = breakdown.get("dexscreener_score", 0)
+        if dex_verified:
+            dex_badge = "🏅 Verified"
+        elif dex_has_profile:
+            dex_badge = "✅ Listed"
+        else:
+            dex_badge = "🚫 Not Found"
+
         message = f"""<b>{emoji} {action}: {name} (${symbol})</b>
 
 <b>📊 Score: {score}/100</b>
 CA: <code>{ca[:20]}...</code> | {mc_str}
+🔍 DexScreener: {dex_badge} ({dex_score:+d} pts)
 
 <b>Breakdown:</b>
 • Status: +{breakdown.get('status', 0)} | Market Cap: +{breakdown.get('market_cap', 0)} | Holders: +{breakdown.get('holders', 0)}

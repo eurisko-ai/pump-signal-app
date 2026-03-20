@@ -32,11 +32,14 @@ class TokenHealthState:
         "last_price",               # last known market cap SOL (proxy for price)
         "bonus_points",             # bonus points for strong momentum
         # --- Transaction size tracking ---
-        "trade_history_1m",         # list of (monotonic_ts, amount_sol, direction) for 1-min window
+        "trade_history_1m",         # list of (monotonic_ts, amount_sol, direction, trader) for 1-min window
         "largest_buy_1m_sol",       # largest single buy in last 1m
         "largest_sell_1m_sol",      # largest single sell in last 1m
         "large_trade_bonus",        # instant bonus/penalty from large trade detection
         "whale_activity_label",     # whale accumulation / whale exit / neutral
+        # --- Holder concentration ---
+        "unique_traders_1m",        # distinct trader addresses in 1m window
+        "holder_concentration_pts", # penalty/bonus from holder concentration
     )
 
     def __init__(self, token_id: int, mint: str):
@@ -54,11 +57,14 @@ class TokenHealthState:
         self.last_price = 0.0
         self.bonus_points = 0
         # --- Transaction size tracking ---
-        self.trade_history_1m = []  # [(monotonic_ts, amount_sol, direction)]
+        self.trade_history_1m = []  # [(monotonic_ts, amount_sol, direction, trader)]
         self.largest_buy_1m_sol = 0.0
         self.largest_sell_1m_sol = 0.0
         self.large_trade_bonus = 0  # net pts from large trade detection
         self.whale_activity_label = "neutral"
+        # --- Holder concentration ---
+        self.unique_traders_1m = 0
+        self.holder_concentration_pts = 0
 
 
 class SignalDegradationEngine:
@@ -85,7 +91,7 @@ class SignalDegradationEngine:
         self._states.pop(token_id, None)
 
     def on_trade(self, token_id: int, amount_sol: float, direction: str,
-                 market_cap_sol: float = 0.0):
+                 market_cap_sol: float = 0.0, trader: str = ""):
         """
         Called on every incoming trade. Updates health state.
         
@@ -94,6 +100,7 @@ class SignalDegradationEngine:
             amount_sol: Trade amount in SOL
             direction: "buy" or "sell"
             market_cap_sol: Current market cap in SOL (from trade event)
+            trader: Trader public key (for holder concentration tracking)
         """
         state = self._states.get(token_id)
         if state is None:
@@ -115,10 +122,10 @@ class SignalDegradationEngine:
         ]
 
         # --- Transaction size tracking ---
-        state.trade_history_1m.append((now_mono, amount_sol, direction))
+        state.trade_history_1m.append((now_mono, amount_sol, direction, trader))
         # Trim trade history to 1-minute window
         state.trade_history_1m = [
-            (ts, amt, d) for ts, amt, d in state.trade_history_1m if ts >= cutoff
+            (ts, amt, d, t) for ts, amt, d, t in state.trade_history_1m if ts >= cutoff
         ]
 
         # Recompute rolling buy/sell volumes from trade history
@@ -126,7 +133,10 @@ class SignalDegradationEngine:
         sell_vol = 0.0
         largest_buy = 0.0
         largest_sell = 0.0
-        for _ts, amt, d in state.trade_history_1m:
+        traders_set = set()
+        for _ts, amt, d, t in state.trade_history_1m:
+            if t:
+                traders_set.add(t)
             if d == "buy":
                 buy_vol += amt
                 if amt > largest_buy:
@@ -135,6 +145,8 @@ class SignalDegradationEngine:
                 sell_vol += amt
                 if amt > largest_sell:
                     largest_sell = amt
+
+        state.unique_traders_1m = len(traders_set)
 
         state.volume_1m_buys_sol = buy_vol
         state.volume_1m_sells_sol = sell_vol
@@ -247,12 +259,17 @@ class SignalDegradationEngine:
                 )
 
         # =============================================
-        # 3. TRANSACTION SIZE WEIGHTING (NEW)
+        # 3. TRANSACTION SIZE WEIGHTING
         # =============================================
         self._evaluate_whale_activity(state, now_mono)
 
         # =============================================
-        # 4. VOLUME MOMENTUM CHECK
+        # 4. HOLDER CONCENTRATION CHECK
+        # =============================================
+        self._evaluate_holder_concentration(state)
+
+        # =============================================
+        # 5. VOLUME MOMENTUM CHECK
         # =============================================
         # Additional volume checks handled in apply_signal_degradation()
         # since raw volume data lives in momentum engine.
@@ -270,7 +287,7 @@ class SignalDegradationEngine:
         # Trim trade history (safety, in case tick fires before on_trade trimmed)
         cutoff = now_mono - 60
         state.trade_history_1m = [
-            (ts, amt, d) for ts, amt, d in state.trade_history_1m if ts >= cutoff
+            (ts, amt, d, t) for ts, amt, d, t in state.trade_history_1m if ts >= cutoff
         ]
 
         trades = state.trade_history_1m
@@ -281,7 +298,7 @@ class SignalDegradationEngine:
 
         # ----- 1. Per-trade large transaction scoring -----
         large_trade_pts = 0
-        for _ts, amt, d in trades:
+        for _ts, amt, d, _t in trades:
             if d == "buy":
                 if amt >= 10.0:
                     large_trade_pts += 30   # major whale buy
@@ -332,11 +349,11 @@ class SignalDegradationEngine:
                     )
 
         # ----- 3. Whale activity concentration -----
-        large_buy_vol = sum(amt for _ts, amt, d in trades if d == "buy" and amt >= 1.0)
-        large_sell_vol = sum(amt for _ts, amt, d in trades if d == "sell" and amt >= 1.0)
+        large_buy_vol = sum(amt for _ts, amt, d, _t in trades if d == "buy" and amt >= 1.0)
+        large_sell_vol = sum(amt for _ts, amt, d, _t in trades if d == "sell" and amt >= 1.0)
         large_total = large_buy_vol + large_sell_vol
         total_trades = len(trades)
-        large_trade_count = sum(1 for _ts, amt, _d in trades if amt >= 1.0)
+        large_trade_count = sum(1 for _ts, amt, _d, _t in trades if amt >= 1.0)
 
         if total_trades > 0 and large_trade_count > 0:
             large_ratio = large_trade_count / total_trades
@@ -371,6 +388,49 @@ class SignalDegradationEngine:
         if state.largest_sell_1m_sol >= 5.0:
             state.degradation_reasons.append(
                 f"🐋⚠️ Largest sell in 1m: {state.largest_sell_1m_sol:.2f} SOL"
+            )
+
+    @staticmethod
+    def _evaluate_holder_concentration(state: TokenHealthState):
+        """
+        Penalize tokens with low unique trader counts (proxy for holder concentration).
+
+        Uses unique traders seen in the 1-minute trade window.
+        Fewer distinct traders = higher concentration risk = any single wallet
+        can crash the price.
+
+        Thresholds:
+          <25 unique traders → -50 pts (DANGER)
+          <50 unique traders → -30 pts (WARNING)
+          <100 unique traders → -10 pts (CAUTION)
+          ≥500 unique traders → +5 pts (healthy)
+        """
+        traders = state.unique_traders_1m
+        state.holder_concentration_pts = 0
+
+        if traders < 25:
+            state.holder_concentration_pts = -50
+            state.degradation_points += 50
+            state.degradation_reasons.append(
+                f"🚨 Only {traders} unique traders — extreme concentration risk"
+            )
+        elif traders < 50:
+            state.holder_concentration_pts = -30
+            state.degradation_points += 30
+            state.degradation_reasons.append(
+                f"⚠️ Only {traders} unique traders — high concentration"
+            )
+        elif traders < 100:
+            state.holder_concentration_pts = -10
+            state.degradation_points += 10
+            state.degradation_reasons.append(
+                f"⚡ {traders} unique traders — moderate concentration"
+            )
+        elif traders >= 500:
+            state.holder_concentration_pts = 5
+            state.bonus_points += 5
+            state.degradation_reasons.append(
+                f"✅ {traders} unique traders — healthy distribution"
             )
 
     def _calc_price_change_1m(self, state: TokenHealthState,
@@ -431,6 +491,7 @@ def apply_signal_degradation(
     volume_1m_sol: float = 0.0,
     buy_count_1m: int = 0,
     sell_count_1m: int = 0,
+    dexscreener_profile: Optional[Dict] = None,
 ) -> Tuple[int, Dict]:
     """
     Apply real-time degradation to a token's base signal score.
@@ -442,6 +503,7 @@ def apply_signal_degradation(
         volume_1m_sol: 1-minute volume in SOL (from momentum engine)
         buy_count_1m: Buy count in last minute
         sell_count_1m: Sell count in last minute
+        dexscreener_profile: Cached DexScreener profile data (optional)
 
     Returns:
         (adjusted_score, adjusted_breakdown)
@@ -500,6 +562,17 @@ def apply_signal_degradation(
         adjusted -= degradation_info.get("degradation_points", 0)
         adjusted += degradation_info.get("bonus_points", 0)
         degrade_reasons.extend(degradation_info.get("degradation_reasons", []))
+
+    # ---- DexScreener legitimacy adjustment (if profile data available) ----
+    if dexscreener_profile is not None:
+        from src.services.dexscreener import dexscreener_service
+        dex_adj, dex_reasons = dexscreener_service.score_legitimacy(dexscreener_profile)
+        adjusted += dex_adj
+        degrade_reasons.extend(dex_reasons)
+        breakdown["dexscreener_score"] = dex_adj
+        breakdown["dexscreener_verified"] = bool(
+            dexscreener_profile and dexscreener_profile.get("verified")
+        )
 
     # Clamp
     final_score = max(0, min(100, int(round(adjusted))))

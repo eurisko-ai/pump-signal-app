@@ -32,6 +32,7 @@ class Token(Base):
     last_tx_timestamp = Column(DateTime, nullable=True)
     embedding = Column(Vector(384), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    dexscreener_profile = Column(JSONB, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     __table_args__ = (

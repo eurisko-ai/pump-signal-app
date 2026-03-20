@@ -22,6 +22,7 @@ from src.config import get_settings
 from src.services.scoring import scoring
 from src.services.telegram_service import TelegramService
 from src.services.momentum_engine import momentum_engine
+from src.services.dexscreener import dexscreener_service
 from src.tasks.trade_tracker import trade_tracker
 from src.utils.logger import setup_logger
 
@@ -179,20 +180,25 @@ async def _insert_token_and_signal(
     """Insert token + signal + alert rows. Returns signal_id or None."""
     pool = await _get_pool()
     raw_event_json = token.get("raw_event_json")
+    # Serialize DexScreener profile to JSON string for JSONB storage
+    dex_profile = token.get("dexscreener_profile")
+    dex_profile_json = json.dumps(dex_profile) if dex_profile else None
+
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Upsert token (with raw event if available)
+            # Upsert token (with raw event and DexScreener profile)
             token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
-                                    volume_24h, holders, raw_create_event, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+                                    volume_24h, holders, raw_create_event, dexscreener_profile, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, NOW())
                 ON CONFLICT (mint) DO UPDATE SET
                     market_cap = EXCLUDED.market_cap,
                     volume_24h = EXCLUDED.volume_24h,
                     holders = EXCLUDED.holders,
                     image_url = COALESCE(EXCLUDED.image_url, tokens.image_url),
                     raw_create_event = COALESCE(tokens.raw_create_event, EXCLUDED.raw_create_event),
+                    dexscreener_profile = COALESCE(EXCLUDED.dexscreener_profile, tokens.dexscreener_profile),
                     updated_at = NOW()
                 RETURNING id
                 """,
@@ -205,6 +211,7 @@ async def _insert_token_and_signal(
                 float(token.get("volume_24h", 0)),
                 int(token.get("holders", 0)),
                 raw_event_json,
+                dex_profile_json,
             )
 
             # Store migration event in token_events audit trail
@@ -384,14 +391,45 @@ async def _handle_migration(event: Dict, sol_price: float):
         logger.debug(f"Skipping {mint[:16]}... mcap=${market_cap:.0f} < min")
         return
 
+    # --- Fetch DexScreener profile for legitimacy scoring ---
+    dex_profile = None
+    try:
+        dex_profile = await dexscreener_service.fetch_profile(mint)
+    except Exception as e:
+        logger.warning(f"DexScreener fetch failed for {mint[:16]}: {e}")
+
+    token["dexscreener_profile"] = dex_profile
+
     # --- Score ---
     score, breakdown = scoring.score_token(token)
+
+    # --- Apply DexScreener legitimacy scoring ---
+    dex_score_adj, dex_reasons = dexscreener_service.score_legitimacy(dex_profile)
+    score = max(0, min(100, score + dex_score_adj))
+    breakdown["dexscreener_score"] = dex_score_adj
+    breakdown["dexscreener_verified"] = bool(dex_profile and dex_profile.get("verified"))
+    breakdown["dexscreener_has_profile"] = dex_profile is not None
+    existing_reasons = breakdown.get("reasons", [])
+    breakdown["reasons"] = (existing_reasons + dex_reasons)[:10]
+    breakdown["final_score"] = score
+
+    # Re-badge after legitimacy adjustment
+    if score >= 70:
+        breakdown["badge"] = "STRONG_BUY"
+    elif score >= 50:
+        breakdown["badge"] = "BUY"
+    elif score >= 30:
+        breakdown["badge"] = "NEUTRAL"
+    else:
+        breakdown["badge"] = "NONE"
+
     seen_tokens[mint] = datetime.utcnow()
     _stats["migrations_processed"] += 1
 
     logger.info(
         f"Migration: {token['name']} ({token['symbol']}) "
-        f"mcap=${market_cap:,.0f} score={score}"
+        f"mcap=${market_cap:,.0f} score={score} "
+        f"dex_adj={dex_score_adj:+d} verified={breakdown['dexscreener_verified']}"
     )
 
     # --- DB insert (always for migrations) ---
@@ -631,4 +669,5 @@ def get_scanner_stats() -> Dict:
         "seen_tokens_count": len(seen_tokens),
         "sol_price_usd": _sol_price_usd,
         "mode": "websocket",
+        "dexscreener_cache": dexscreener_service.get_cache_stats(),
     }
