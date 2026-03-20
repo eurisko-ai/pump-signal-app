@@ -23,6 +23,7 @@ class Token(Base):
     description = Column(Text, nullable=True)
     image_url = Column(Text, nullable=True)
     raw_create_event = Column(JSONB, nullable=True)
+    bonding_curve_ca = Column(String(255), nullable=True, index=True)
     market_cap = Column(Float, nullable=True)
     volume_24h = Column(Float, nullable=True)
     holders = Column(Integer, nullable=True)
