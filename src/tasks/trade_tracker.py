@@ -81,7 +81,7 @@ class TradeTracker:
         logger.info(f"⏹️ Untracked {mint[:16]}... (idle or max capacity)")
     
     async def on_trade_event(self, event: dict):
-        """Handle incoming trade event — feeds momentum engine + updates market cap in DB"""
+        """Handle incoming trade event — feeds momentum engine + updates market cap in DB + stores raw event"""
         mint = event.get("mint", "")
         if mint not in self.tracked_tokens:
             return
@@ -90,12 +90,31 @@ class TradeTracker:
         
         try:
             amount_sol = float(event.get("solAmount", 0))
-            direction = "buy" if event.get("txType", "").lower() == "buy" else "sell"
+            tx_type = event.get("txType", "").lower()
+            direction = "buy" if tx_type == "buy" else "sell"
             trader = event.get("traderPublicKey", "unknown")
             timestamp = datetime.utcnow()
             
             # Add to momentum engine
             momentum_engine.add_trade(token_id, trader, amount_sol, direction, timestamp)
+            
+            # Store complete raw trade event in token_events table
+            try:
+                raw_event_json = json.dumps(event)
+                event_type = tx_type if tx_type in ('buy', 'sell') else 'buy'
+                pool = await _get_trade_db_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO token_events (token_id, event_type, raw_event)
+                        VALUES ($1, $2, $3::jsonb)
+                        """,
+                        token_id,
+                        event_type,
+                        raw_event_json,
+                    )
+            except Exception as e:
+                logger.debug(f"Raw event storage error for {mint[:16]}: {e}")
             
             # Update market cap in DB if present in event
             market_cap_sol = event.get("marketCapSol")

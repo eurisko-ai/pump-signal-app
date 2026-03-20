@@ -103,9 +103,13 @@ async def _resolve_metadata_uri(uri: str) -> Optional[str]:
         return None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status != 200:
                     return None
+                content_type = resp.headers.get("content-type", "")
+                if "image" in content_type:
+                    # URI is actually a direct image, not metadata JSON
+                    return uri
                 data = await resp.json()
                 image_url = data.get("image") or data.get("image_url") or data.get("imageUrl")
                 if image_url and isinstance(image_url, str) and image_url.startswith("http"):
@@ -174,19 +178,21 @@ async def _insert_token_and_signal(
 ) -> Optional[int]:
     """Insert token + signal + alert rows. Returns signal_id or None."""
     pool = await _get_pool()
+    raw_event_json = token.get("raw_event_json")
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Upsert token
+            # Upsert token (with raw event if available)
             token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
-                                    volume_24h, holders, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                                    volume_24h, holders, raw_create_event, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
                 ON CONFLICT (mint) DO UPDATE SET
                     market_cap = EXCLUDED.market_cap,
                     volume_24h = EXCLUDED.volume_24h,
                     holders = EXCLUDED.holders,
                     image_url = COALESCE(EXCLUDED.image_url, tokens.image_url),
+                    raw_create_event = COALESCE(tokens.raw_create_event, EXCLUDED.raw_create_event),
                     updated_at = NOW()
                 RETURNING id
                 """,
@@ -198,7 +204,19 @@ async def _insert_token_and_signal(
                 float(token.get("market_cap", 0)),
                 float(token.get("volume_24h", 0)),
                 int(token.get("holders", 0)),
+                raw_event_json,
             )
+
+            # Store migration event in token_events audit trail
+            if token_id and raw_event_json:
+                await conn.execute(
+                    """
+                    INSERT INTO token_events (token_id, event_type, raw_event)
+                    VALUES ($1, 'migration', $2::jsonb)
+                    """,
+                    token_id,
+                    raw_event_json,
+                )
 
             # Always return token_id (for momentum tracking), but only create signal if score meets threshold
             if score >= settings.alert_threshold:
@@ -355,6 +373,9 @@ async def _handle_migration(event: Dict, sol_price: float):
             pass
     token["image_url"] = image_url
     
+    # Store raw migration event JSON
+    token["raw_event_json"] = json.dumps(event)
+    
     market_cap = token["market_cap"]
 
     if market_cap < settings.min_market_cap:
@@ -417,6 +438,9 @@ async def _handle_create(event: Dict, sol_price: float):
             image_url = await _resolve_metadata_uri(metadata_uri)
     token["image_url"] = image_url
 
+    # Store complete raw event as JSON
+    raw_event_json = json.dumps(event)
+
     # Insert token + start tracking trades (Phase 2: pre-migration momentum)
     try:
         pool = await _get_pool()
@@ -424,9 +448,11 @@ async def _handle_create(event: Dict, sol_price: float):
             token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
-                                    volume_24h, holders, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
+                                    volume_24h, holders, raw_create_event, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+                ON CONFLICT (mint) DO UPDATE SET
+                    raw_create_event = COALESCE(EXCLUDED.raw_create_event, tokens.raw_create_event),
+                    updated_at = NOW()
                 RETURNING id
                 """,
                 token["mint"],
@@ -437,7 +463,18 @@ async def _handle_create(event: Dict, sol_price: float):
                 float(token.get("market_cap", 0)),
                 0,
                 1,
+                raw_event_json,
             )
+            # Also insert into token_events for audit trail
+            if token_id:
+                await conn.execute(
+                    """
+                    INSERT INTO token_events (token_id, event_type, raw_event)
+                    VALUES ($1, 'create', $2::jsonb)
+                    """,
+                    token_id,
+                    raw_event_json,
+                )
         # Phase 2: Track trades from creation to detect pre-migration momentum
         if token_id:
             try:

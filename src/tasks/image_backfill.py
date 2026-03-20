@@ -21,15 +21,22 @@ async def _resolve_metadata_uri(uri: str) -> str | None:
         return None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(uri, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
+                    logger.debug(f"Metadata URI returned {resp.status}: {uri[:60]}")
                     return None
+                content_type = resp.headers.get("content-type", "")
+                if "image" in content_type:
+                    # It's actually a direct image, not metadata JSON
+                    logger.debug(f"URI is direct image (content-type={content_type}): {uri[:60]}")
+                    return uri
                 data = await resp.json()
                 image_url = data.get("image") or data.get("image_url") or data.get("imageUrl")
                 if image_url and isinstance(image_url, str) and image_url.startswith("http"):
                     return image_url
+                logger.debug(f"Metadata JSON had no image field. Keys: {list(data.keys())[:5]}")
     except Exception as e:
-        logger.debug(f"Metadata resolve failed for {uri[:60]}: {e}")
+        logger.debug(f"Metadata resolve failed for {uri[:60]}: {type(e).__name__}: {e}")
     return None
 
 
@@ -37,24 +44,34 @@ def _is_metadata_uri(url: str) -> bool:
     """Check if a URL looks like a metadata URI (JSON) rather than an image."""
     if not url:
         return False
-    # Common metadata URI patterns (not direct images)
-    metadata_patterns = [
+    # Direct image patterns — if URL clearly points to an image, it's not metadata
+    image_patterns = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
+    url_lower = url.lower()
+    if any(url_lower.endswith(ext) for ext in image_patterns):
+        return False
+    # Known direct-image hosts (not metadata)
+    image_hosts = ["edge.uxento.io/image/", "cdn.digitaloceanspaces.com", "myfilebase.com/ipfs/"]
+    if any(h in url for h in image_hosts):
+        return False
+    # Common metadata URI patterns (case-sensitive where needed)
+    metadata_patterns_cs = [
+        "/ipfs/Qm",        # IPFS CIDv0 (base58, starts with Qm — typically metadata JSON)
+    ]
+    metadata_patterns_ci = [
         ".json",
-        "/ipfs/Qm",       # IPFS CIDv0 (typically metadata JSON)
-        "/ipfs/bafkrei",   # IPFS CIDv1 (could be either, check content-type)
+        "/ipfs/bafkrei",   # IPFS CIDv1 base32
+        "/ipfs/bafybei",   # IPFS CIDv1 base32 (dag-pb)
         "meta.uxento.io",
         "metadata.rapidlaunch.io",
         "arweave.net",
     ]
-    # Direct image patterns
-    image_patterns = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
-    
-    url_lower = url.lower()
-    # If it's clearly an image file, it's not metadata
-    if any(url_lower.endswith(ext) for ext in image_patterns):
-        return False
-    # If it matches metadata patterns, likely metadata
-    return any(p in url_lower for p in metadata_patterns)
+    # Case-sensitive check
+    if any(p in url for p in metadata_patterns_cs):
+        return True
+    # Case-insensitive check
+    if any(p in url_lower for p in metadata_patterns_ci):
+        return True
+    return False
 
 
 async def _fetch_image_from_dexscreener(mint: str) -> str | None:

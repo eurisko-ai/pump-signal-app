@@ -1,6 +1,7 @@
 """SQLAlchemy models for Pump Signal app"""
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, CheckConstraint, Enum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from pgvector.sqlalchemy import Vector
 import enum
@@ -21,6 +22,7 @@ class Token(Base):
     symbol = Column(String(50), nullable=False)
     description = Column(Text, nullable=True)
     image_url = Column(Text, nullable=True)
+    raw_create_event = Column(JSONB, nullable=True)
     market_cap = Column(Float, nullable=True)
     volume_24h = Column(Float, nullable=True)
     holders = Column(Integer, nullable=True)
@@ -101,6 +103,22 @@ class Settings(Base):
     key = Column(String(255), nullable=False, unique=True)
     value = Column(String(1024), nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class TokenEvent(Base):
+    __tablename__ = "token_events"
+    
+    id = Column(Integer, primary_key=True)
+    token_id = Column(Integer, ForeignKey("tokens.id"), nullable=False)
+    event_type = Column(String(20), nullable=False)  # 'create', 'buy', 'sell', 'migration'
+    raw_event = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    __table_args__ = (
+        Index('idx_token_events_token_id', 'token_id'),
+        Index('idx_token_events_type', 'event_type'),
+        Index('idx_token_events_created_at', 'created_at', postgresql_ops={'created_at': 'DESC'}),
+    )
+
 
 class TokenPriceHistory(Base):
     __tablename__ = "token_price_history"
