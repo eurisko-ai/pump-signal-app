@@ -31,6 +31,12 @@ class TokenHealthState:
         "degradation_reasons",      # list of active demotion reasons
         "last_price",               # last known market cap SOL (proxy for price)
         "bonus_points",             # bonus points for strong momentum
+        # --- Transaction size tracking ---
+        "trade_history_1m",         # list of (monotonic_ts, amount_sol, direction) for 1-min window
+        "largest_buy_1m_sol",       # largest single buy in last 1m
+        "largest_sell_1m_sol",      # largest single sell in last 1m
+        "large_trade_bonus",        # instant bonus/penalty from large trade detection
+        "whale_activity_label",     # whale accumulation / whale exit / neutral
     )
 
     def __init__(self, token_id: int, mint: str):
@@ -47,6 +53,12 @@ class TokenHealthState:
         self.degradation_reasons = []
         self.last_price = 0.0
         self.bonus_points = 0
+        # --- Transaction size tracking ---
+        self.trade_history_1m = []  # [(monotonic_ts, amount_sol, direction)]
+        self.largest_buy_1m_sol = 0.0
+        self.largest_sell_1m_sol = 0.0
+        self.large_trade_bonus = 0  # net pts from large trade detection
+        self.whale_activity_label = "neutral"
 
 
 class SignalDegradationEngine:
@@ -102,6 +114,36 @@ class SignalDegradationEngine:
             (ts, p) for ts, p in state.price_history_1m if ts >= cutoff
         ]
 
+        # --- Transaction size tracking ---
+        state.trade_history_1m.append((now_mono, amount_sol, direction))
+        # Trim trade history to 1-minute window
+        state.trade_history_1m = [
+            (ts, amt, d) for ts, amt, d in state.trade_history_1m if ts >= cutoff
+        ]
+
+        # Recompute rolling buy/sell volumes from trade history
+        buy_vol = 0.0
+        sell_vol = 0.0
+        largest_buy = 0.0
+        largest_sell = 0.0
+        for _ts, amt, d in state.trade_history_1m:
+            if d == "buy":
+                buy_vol += amt
+                if amt > largest_buy:
+                    largest_buy = amt
+            else:
+                sell_vol += amt
+                if amt > largest_sell:
+                    largest_sell = amt
+
+        state.volume_1m_buys_sol = buy_vol
+        state.volume_1m_sells_sol = sell_vol
+        state.largest_buy_1m_sol = largest_buy
+        state.largest_sell_1m_sol = largest_sell
+
+        # --- Large trade instant detection (applied on THIS trade) ---
+        self._score_large_trade(state, amount_sol, direction)
+
     def tick(self) -> Dict[int, Dict]:
         """
         Run degradation checks for all tracked tokens.
@@ -132,6 +174,18 @@ class SignalDegradationEngine:
             self._states.pop(tid, None)
 
         return results
+
+    @staticmethod
+    def _score_large_trade(state: TokenHealthState, amount_sol: float, direction: str):
+        """
+        Compute instant bonus/penalty for a single large trade.
+        Called on every trade from on_trade(). Accumulated in state.large_trade_bonus.
+        The bonus is recalculated fresh each tick from the 1m trade history.
+        """
+        # We recalculate in _evaluate_whale_activity instead of accumulating
+        # (to keep it window-based, not unbounded). This method is intentionally
+        # a no-op now — whale scoring happens in tick via _evaluate_whale_activity.
+        pass
 
     def _evaluate_token(self, state: TokenHealthState, now_mono: float):
         """Evaluate a single token's health and compute degradation."""
@@ -193,11 +247,131 @@ class SignalDegradationEngine:
                 )
 
         # =============================================
-        # 3. VOLUME MOMENTUM CHECK
+        # 3. TRANSACTION SIZE WEIGHTING (NEW)
         # =============================================
-        # We get volume data from momentum engine buffers during apply_degradation
-        # This is handled at score-application time since volume data lives in
-        # the momentum engine, not here. See apply_signal_degradation().
+        self._evaluate_whale_activity(state, now_mono)
+
+        # =============================================
+        # 4. VOLUME MOMENTUM CHECK
+        # =============================================
+        # Additional volume checks handled in apply_signal_degradation()
+        # since raw volume data lives in momentum engine.
+
+    @staticmethod
+    def _evaluate_whale_activity(state: TokenHealthState, now_mono: float):
+        """
+        Transaction-size-weighted analysis on the 1-minute trade window.
+
+        Applies:
+        1. Large-trade detection bonus/penalty per individual trade.
+        2. Weighted buy-vs-sell volume comparison.
+        3. Whale-activity concentration label.
+        """
+        # Trim trade history (safety, in case tick fires before on_trade trimmed)
+        cutoff = now_mono - 60
+        state.trade_history_1m = [
+            (ts, amt, d) for ts, amt, d in state.trade_history_1m if ts >= cutoff
+        ]
+
+        trades = state.trade_history_1m
+        if not trades:
+            state.whale_activity_label = "neutral"
+            state.large_trade_bonus = 0
+            return
+
+        # ----- 1. Per-trade large transaction scoring -----
+        large_trade_pts = 0
+        for _ts, amt, d in trades:
+            if d == "buy":
+                if amt >= 10.0:
+                    large_trade_pts += 30   # major whale buy
+                elif amt >= 5.0:
+                    large_trade_pts += 20   # whale buy
+                elif amt >= 1.0:
+                    large_trade_pts += 10   # large buy
+            else:  # sell
+                if amt >= 10.0:
+                    large_trade_pts -= 50   # dumping
+                elif amt >= 5.0:
+                    large_trade_pts -= 40   # danger sell
+                elif amt >= 1.0:
+                    large_trade_pts -= 20   # warning sell
+
+        # Cap so a single window can't swing more than ±60 net
+        large_trade_pts = max(-60, min(60, large_trade_pts))
+        state.large_trade_bonus = large_trade_pts
+
+        if large_trade_pts > 0:
+            state.bonus_points += large_trade_pts
+        elif large_trade_pts < 0:
+            state.degradation_points += abs(large_trade_pts)
+
+        # ----- 2. Weighted buy vs sell volume -----
+        buy_vol = state.volume_1m_buys_sol
+        sell_vol = state.volume_1m_sells_sol
+        total_vol = buy_vol + sell_vol
+
+        if total_vol > 0:
+            if sell_vol > buy_vol:
+                # Net selling pressure — the bigger the gap the worse
+                sell_dominance = (sell_vol - buy_vol) / total_vol  # 0-1
+                penalty = int(round(sell_dominance * 30))  # up to -30
+                state.degradation_points += penalty
+                if penalty >= 15:
+                    state.degradation_reasons.append(
+                        f"🐋💨 Sell volume dominates: {sell_vol:.2f} vs {buy_vol:.2f} SOL"
+                    )
+            elif buy_vol > sell_vol * 1.5:
+                # Strong net buying — boost
+                buy_dominance = (buy_vol - sell_vol) / total_vol  # 0-1
+                bonus = int(round(buy_dominance * 20))  # up to +20
+                state.bonus_points += bonus
+                if bonus >= 10:
+                    state.degradation_reasons.append(
+                        f"🐋🟢 Buy volume dominates: {buy_vol:.2f} vs {sell_vol:.2f} SOL"
+                    )
+
+        # ----- 3. Whale activity concentration -----
+        large_buy_vol = sum(amt for _ts, amt, d in trades if d == "buy" and amt >= 1.0)
+        large_sell_vol = sum(amt for _ts, amt, d in trades if d == "sell" and amt >= 1.0)
+        large_total = large_buy_vol + large_sell_vol
+        total_trades = len(trades)
+        large_trade_count = sum(1 for _ts, amt, _d in trades if amt >= 1.0)
+
+        if total_trades > 0 and large_trade_count > 0:
+            large_ratio = large_trade_count / total_trades
+
+            if large_total > 0:
+                large_buy_pct = large_buy_vol / large_total
+
+                if large_buy_pct >= 0.80 and large_ratio >= 0.3:
+                    state.whale_activity_label = "whale_accumulation"
+                    state.bonus_points += 15
+                    state.degradation_reasons.append(
+                        f"🐋📈 Whale accumulation: {large_buy_pct:.0%} of large-trade vol is buys"
+                    )
+                elif (1 - large_buy_pct) >= 0.80 and large_ratio >= 0.3:
+                    state.whale_activity_label = "whale_exit"
+                    state.degradation_points += 25
+                    state.degradation_reasons.append(
+                        f"🐋📉 Whale exit: {(1-large_buy_pct):.0%} of large-trade vol is sells"
+                    )
+                else:
+                    state.whale_activity_label = "mixed"
+            else:
+                state.whale_activity_label = "retail_only"
+        else:
+            state.whale_activity_label = "neutral"
+
+        # Log large-trade reasons for visibility
+        if state.largest_buy_1m_sol >= 5.0:
+            state.degradation_reasons.append(
+                f"🐋 Largest buy in 1m: {state.largest_buy_1m_sol:.2f} SOL"
+            )
+        if state.largest_sell_1m_sol >= 5.0:
+            state.degradation_reasons.append(
+                f"🐋⚠️ Largest sell in 1m: {state.largest_sell_1m_sol:.2f} SOL"
+            )
 
     def _calc_price_change_1m(self, state: TokenHealthState,
                               now_mono: float) -> Optional[float]:
@@ -231,6 +405,15 @@ class SignalDegradationEngine:
             "seconds_since_trade": round(time.monotonic() - state.last_trade_time, 1),
             "last_trade_utc": state.last_trade_utc.isoformat() if state.last_trade_utc else None,
             "last_price": state.last_price,
+            # --- Transaction size fields ---
+            "buy_volume_1m_sol": state.volume_1m_buys_sol,
+            "sell_volume_1m_sol": state.volume_1m_sells_sol,
+            "largest_buy_1m_sol": state.largest_buy_1m_sol,
+            "largest_sell_1m_sol": state.largest_sell_1m_sol,
+            "large_trade_bonus": state.large_trade_bonus,
+            "whale_activity": state.whale_activity_label,
+            "total_trades_1m": len(state.trade_history_1m),
+            "large_trades_1m": sum(1 for _ts, amt, _d in state.trade_history_1m if amt >= 1.0),
         }
 
     def get_all_degradation(self) -> Dict[int, Dict]:
@@ -278,6 +461,29 @@ def apply_signal_degradation(
         sell_ratio = sell_count_1m / total_1m * 100
         degrade_reasons.append(f"⚠️ Sell pressure ({sell_ratio:.0f}% sells)")
 
+    # ---- Size-weighted volume cross-check (from degradation state) ----
+    if degradation_info:
+        buy_vol_sol = degradation_info.get("buy_volume_1m_sol", 0)
+        sell_vol_sol = degradation_info.get("sell_volume_1m_sol", 0)
+        whale_label = degradation_info.get("whale_activity", "neutral")
+        largest_sell = degradation_info.get("largest_sell_1m_sol", 0)
+
+        # Severe sell-volume dominance that wasn't caught by count-based check
+        if sell_vol_sol > 0 and buy_vol_sol > 0:
+            vol_ratio = sell_vol_sol / (buy_vol_sol + sell_vol_sol)
+            if vol_ratio >= 0.7 and sell_vol_sol >= 2.0:
+                adjusted -= 20
+                degrade_reasons.append(
+                    f"🐋💨 SOL sell vol {sell_vol_sol:.1f} >> buy vol {buy_vol_sol:.1f}"
+                )
+
+        # Whale dump detection: single large sell ≥10 SOL
+        if largest_sell >= 10.0:
+            adjusted -= 15
+            degrade_reasons.append(
+                f"🚨 Whale dump detected: {largest_sell:.1f} SOL single sell"
+            )
+
     # ---- Apply degradation engine results ----
     if degradation_info:
         if degradation_info.get("kill"):
@@ -319,6 +525,16 @@ def apply_signal_degradation(
     breakdown["seconds_since_trade"] = (
         degradation_info.get("seconds_since_trade", 0) if degradation_info else 0
     )
+
+    # Attach transaction-size metadata for downstream consumers
+    if degradation_info:
+        breakdown["buy_volume_1m_sol"] = degradation_info.get("buy_volume_1m_sol", 0)
+        breakdown["sell_volume_1m_sol"] = degradation_info.get("sell_volume_1m_sol", 0)
+        breakdown["largest_buy_1m_sol"] = degradation_info.get("largest_buy_1m_sol", 0)
+        breakdown["largest_sell_1m_sol"] = degradation_info.get("largest_sell_1m_sol", 0)
+        breakdown["whale_activity"] = degradation_info.get("whale_activity", "neutral")
+        breakdown["large_trades_1m"] = degradation_info.get("large_trades_1m", 0)
+        breakdown["total_trades_1m"] = degradation_info.get("total_trades_1m", 0)
 
     # Update reasons list
     existing_reasons = breakdown.get("reasons", [])
