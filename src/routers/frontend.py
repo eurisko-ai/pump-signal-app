@@ -162,6 +162,38 @@ async def get_active_tokens():
             else:
                 badge = "NONE"
 
+            # Determine creator activity from events
+            creator_activity = "unknown"
+            creator_holding = dev_pct
+            if creator and latest_buy.get("traderPublicKey") == creator:
+                # Last trade was by the creator
+                last_type = latest_buy.get("txType", "")
+                if last_type == "buy":
+                    creator_activity = "buying"
+                elif last_type == "sell":
+                    creator_activity = "selling"
+                else:
+                    creator_activity = "holding"
+            elif creator:
+                creator_activity = "holding"
+
+            # Build top 10 holders approximation
+            top_10_holders = []
+            if creator and dev_pct > 0:
+                top_10_holders.append({
+                    "address": creator,
+                    "percent": round(dev_pct, 2),
+                    "is_creator": True,
+                })
+            if top_holder_pct > 0 and latest_buy.get("traderPublicKey"):
+                trader = latest_buy["traderPublicKey"]
+                if trader != creator:
+                    top_10_holders.append({
+                        "address": trader,
+                        "percent": round(top_holder_pct, 2),
+                        "is_creator": False,
+                    })
+
             token_data = {
                 "id": t["id"],
                 "mint": t["mint"],
@@ -181,6 +213,9 @@ async def get_active_tokens():
                 "signal_score": score,
                 "signal_badge": badge,
                 "creator_address": creator,
+                "creator_holding_percent": round(creator_holding, 2),
+                "creator_activity": creator_activity,
+                "top_10_holders": top_10_holders,
                 "metadata_uri": uri,
                 "description": t["description"] or "",
                 "last_trade_at": t["last_trade_at"].isoformat() if t["last_trade_at"] else None,
@@ -521,13 +556,62 @@ async def get_token_stats():
 # ============================================================================
 @router.get("/tokens/filtered")
 async def get_filtered_tokens(
-    age: Optional[str] = Query(None),
-    min_bonding: Optional[float] = Query(None),
-    max_bonding: Optional[float] = Query(None),
-    min_mc: Optional[float] = Query(None),
-    max_mc: Optional[float] = Query(None),
-    min_signal: Optional[int] = Query(None)
+    signal_min: Optional[int] = Query(None, description="Min signal score"),
+    dev_holding_max: Optional[float] = Query(None, description="Max dev holding %"),
+    top_holder_max: Optional[float] = Query(None, description="Max top holder %"),
+    bonding_curve_min: Optional[float] = Query(None, description="Min bonding curve %"),
+    market_cap_min: Optional[float] = Query(None, description="Min market cap USD"),
+    market_cap_max: Optional[float] = Query(None, description="Max market cap USD"),
+    age_min: Optional[int] = Query(None, description="Min age in seconds"),
+    age_max: Optional[int] = Query(None, description="Max age in seconds"),
 ):
-    """Get tokens with advanced filtering - delegates to active with client-side filtering"""
-    # For simplicity, return the same as active and let the frontend filter
-    return await get_active_tokens()
+    """Get tokens with server-side filtering"""
+    all_tokens = await get_active_tokens()
+    now = datetime.utcnow()
+    filtered = []
+
+    for t in all_tokens:
+        # Signal score filter
+        if signal_min is not None and (t.get("signal_score", 0) or 0) < signal_min:
+            continue
+        # Dev holding filter
+        if dev_holding_max is not None and (t.get("dev_holding_percent", 0) or 0) > dev_holding_max:
+            continue
+        # Top holder filter
+        if top_holder_max is not None and (t.get("top_holder_percent", 0) or 0) > top_holder_max:
+            continue
+        # Bonding curve filter
+        if bonding_curve_min is not None and (t.get("bonding_curve_percent", 0) or 0) < bonding_curve_min:
+            continue
+        # Market cap filters
+        mc = t.get("market_cap", 0) or 0
+        if market_cap_min is not None and mc < market_cap_min:
+            continue
+        if market_cap_max is not None and mc > market_cap_max:
+            continue
+        # Age filters
+        if age_min is not None or age_max is not None:
+            try:
+                created = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00").replace("+00:00", ""))
+                age_s = (now - created).total_seconds()
+            except:
+                age_s = 0
+            if age_min is not None and age_s < age_min:
+                continue
+            if age_max is not None and age_s > age_max:
+                continue
+        filtered.append(t)
+
+    # Build stats for filtered set
+    signal_counts = {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0}
+    for t in filtered:
+        badge = (t.get("signal_badge") or "NONE").lower()
+        if badge in signal_counts:
+            signal_counts[badge] += 1
+
+    return {
+        "tokens": filtered,
+        "total": len(all_tokens),
+        "filtered_count": len(filtered),
+        "signal_counts": signal_counts,
+    }
