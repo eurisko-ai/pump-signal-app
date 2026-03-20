@@ -94,7 +94,7 @@ async def get_active_tokens():
             FROM tokens t
             WHERE t.mint LIKE '%pump'
             ORDER BY t.created_at DESC
-            LIMIT 500
+            LIMIT 100
             """
         )
 
