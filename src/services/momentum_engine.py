@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.logger import setup_logger
+from src.services.signal_degradation import degradation_engine
 
 logger = setup_logger("momentum_engine")
 
@@ -366,19 +367,23 @@ class MomentumEngine:
         # Evict oldest if at capacity
         while len(self._buffers) >= MAX_TRACKED_TOKENS:
             evicted_id, evicted_buf = self._buffers.popitem(last=False)
+            degradation_engine.remove_token(evicted_id)
             logger.debug(f"Evicted token {evicted_buf.mint[:16]} (LRU)")
 
         self._buffers[token_id] = TokenTradeBuffer(token_id, mint, is_migrated)
+        degradation_engine.register_token(token_id, mint)
         logger.debug(f"Tracking token {mint[:16]} (id={token_id}, migrated={is_migrated})")
 
     def add_trade(self, token_id: int, trader: str, amount_sol: float,
-                  direction: str, ts: datetime):
+                  direction: str, ts: datetime, market_cap_sol: float = 0.0):
         """Ingest a single trade. Must call register_token first."""
         buf = self._buffers.get(token_id)
         if buf is None:
             return
         buf.add_trade(trader, amount_sol, direction, ts)
         self._buffers.move_to_end(token_id)
+        # Feed degradation engine
+        degradation_engine.on_trade(token_id, amount_sol, direction, market_cap_sol)
 
     def mark_migrated(self, token_id: int):
         """Update token status to migrated (affects signal classification)."""
@@ -429,6 +434,13 @@ class MomentumEngine:
                     buf = self._buffers.pop(tid, None)
                     if buf:
                         logger.debug(f"Removed stale token {buf.mint[:16]}")
+                    degradation_engine.remove_token(tid)
+
+                # Run degradation tick (evaluates all tracked tokens)
+                try:
+                    degradation_engine.tick()
+                except Exception as de:
+                    logger.error(f"Degradation tick error: {de}")
 
             except Exception as e:
                 logger.error(f"Tick loop error: {e}")

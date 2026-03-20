@@ -5,6 +5,7 @@ import asyncio
 import json
 from datetime import datetime
 from src.services.momentum_engine import momentum_engine
+from src.services.signal_degradation import degradation_engine
 from src.utils.logger import setup_logger
 
 logger = setup_logger("sse")
@@ -74,6 +75,16 @@ async def token_update_stream():
             for update in mc_updates.values():
                 yield f"data: {json.dumps(update)}\n\n"
             
+            # Every 5 ticks: broadcast degradation events for demoted/killed tokens
+            if tick % 5 == 0:
+                try:
+                    all_degrade = degradation_engine.get_all_degradation()
+                    for tid, info in all_degrade.items():
+                        if info and (info.get("kill") or info.get("degradation_points", 0) > 0):
+                            yield f"data: {json.dumps({'type': 'signal_degradation', 'token_id': tid, 'degradation': info, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                except Exception as e:
+                    logger.error(f"SSE degradation broadcast error: {e}")
+
             last_token_ids = current_token_ids
             tick += 1
             

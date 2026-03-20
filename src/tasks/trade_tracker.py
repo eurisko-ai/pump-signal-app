@@ -95,8 +95,9 @@ class TradeTracker:
             trader = event.get("traderPublicKey", "unknown")
             timestamp = datetime.utcnow()
             
-            # Add to momentum engine
-            momentum_engine.add_trade(token_id, trader, amount_sol, direction, timestamp)
+            # Add to momentum engine (include market cap for degradation price tracking)
+            mc_sol = float(event.get("marketCapSol", 0) or 0)
+            momentum_engine.add_trade(token_id, trader, amount_sol, direction, timestamp, mc_sol)
             
             # Store complete raw trade event in token_events table
             try:

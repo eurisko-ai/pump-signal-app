@@ -8,6 +8,7 @@ from src.config import get_settings
 from src.utils.logger import setup_logger
 from src.services.scoring import scoring_v3
 from src.services.momentum_engine import momentum_engine
+from src.services.signal_degradation import degradation_engine, apply_signal_degradation
 
 logger = setup_logger("frontend_api")
 settings = get_settings()
@@ -222,7 +223,32 @@ async def get_active_tokens():
                 "txns_per_minute": txns_per_min,
             }
 
-            score, breakdown = scoring_v3.score_token(scoring_data)
+            base_score, breakdown = scoring_v3.score_token(scoring_data)
+
+            # ============================================
+            # REAL-TIME SIGNAL DEGRADATION
+            # ============================================
+            degrade_info = degradation_engine.get_degradation_info(t["id"])
+
+            # Get 1-min volume from momentum engine buffer
+            vol_1m_sol = 0.0
+            buy_1m = 0
+            sell_1m = 0
+            me_buf = momentum_engine.get_buffer(t["id"])
+            if me_buf and not me_buf.trades.empty:
+                one_min_ago = datetime.utcnow() - timedelta(seconds=60)
+                recent = me_buf.trades[me_buf.trades["timestamp"] >= one_min_ago]
+                if not recent.empty:
+                    vol_1m_sol = float(recent["amount_sol"].sum())
+                    buy_1m = int((recent["direction"] == "buy").sum())
+                    sell_1m = int((recent["direction"] == "sell").sum())
+
+            score, breakdown = apply_signal_degradation(
+                base_score, breakdown, degrade_info,
+                volume_1m_sol=vol_1m_sol,
+                buy_count_1m=buy_1m,
+                sell_count_1m=sell_1m,
+            )
 
             badge = breakdown.get("badge", "NONE")
             uri = create_event.get("uri", "")
@@ -290,6 +316,11 @@ async def get_active_tokens():
                 "twitter": None,
                 "telegram": None,
                 "website": None,
+                # Real-time degradation data
+                "degraded": breakdown.get("degraded", False),
+                "original_score": breakdown.get("original_score"),
+                "seconds_since_trade": breakdown.get("seconds_since_trade", 0),
+                "degradation_reasons": breakdown.get("degradation_reasons", []),
             }
             result.append(token_data)
 
@@ -502,6 +533,31 @@ async def get_token_stats():
                 "migrated": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
             },
         }
+
+
+# ============================================================================
+# SIGNAL DEGRADATION STATUS
+# ============================================================================
+@router.get("/degradation/status")
+async def get_degradation_status():
+    """Get real-time signal degradation status for all tracked tokens."""
+    try:
+        all_degrade = degradation_engine.get_all_degradation()
+        killed = [d for d in all_degrade.values() if d and d.get("kill")]
+        demoted = [d for d in all_degrade.values() if d and not d.get("kill") and d.get("degradation_points", 0) > 0]
+        healthy = [d for d in all_degrade.values() if d and not d.get("kill") and d.get("degradation_points", 0) == 0]
+
+        return {
+            "total_tracked": degradation_engine.tracked_count,
+            "killed_count": len(killed),
+            "demoted_count": len(demoted),
+            "healthy_count": len(healthy),
+            "killed": killed[:20],
+            "demoted": demoted[:20],
+        }
+    except Exception as e:
+        logger.error(f"Error fetching degradation status: {e}")
+        return {"error": str(e)}
 
 
 # ============================================================================
