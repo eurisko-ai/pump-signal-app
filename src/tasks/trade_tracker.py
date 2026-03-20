@@ -3,6 +3,7 @@ import asyncio
 import json
 import websockets
 import asyncpg
+import aiohttp
 from typing import Dict, Set, Optional
 from datetime import datetime
 from src.config import get_settings
@@ -11,6 +12,9 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger("trade_tracker")
 settings = get_settings()
+
+# Cache for holder count fetches (mint -> holders, timestamp)
+_holder_cache: Dict[str, tuple] = {}
 
 PUMPPORTAL_WS_URI = getattr(settings, "pumpportal_ws_uri", "wss://pumpportal.fun/api/data")
 WS_RECONNECT_MAX_DELAY = getattr(settings, "ws_reconnect_max_delay", 30)
@@ -25,6 +29,26 @@ async def _get_trade_db_pool() -> asyncpg.Pool:
         _trade_db_pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     return _trade_db_pool
 
+async def fetch_holder_count(mint: str) -> Optional[int]:
+    """Fetch real holder count from DexScreener API"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("pairs"):
+                        # Get first pair's holder info
+                        pair = data["pairs"][0]
+                        holders = pair.get("holder", {}).get("count")
+                        if holders:
+                            _holder_cache[mint] = (holders, datetime.utcnow())
+                            return holders
+    except Exception as e:
+        logger.debug(f"Holder count fetch error for {mint[:16]}: {e}")
+    
+    return None
+
 class TradeTracker:
     """Manage dynamic per-token trade subscriptions"""
     
@@ -33,6 +57,7 @@ class TradeTracker:
         self.token_to_id: Dict[str, int] = {}  # {mint: token_id}
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.running = False
+        self.trade_count_per_token: Dict[str, int] = {}  # Track trades for periodic updates
     
     async def connect(self):
         """Establish WebSocket connection to PumpPortal"""
@@ -145,6 +170,22 @@ class TradeTracker:
                     
                 except Exception as e:
                     logger.error(f"❌ Market cap update error for {mint[:16]}: {e}")
+            # Update holder count every 5 trades per token (to avoid API spam)
+            self.trade_count_per_token[mint] = self.trade_count_per_token.get(mint, 0) + 1
+            if self.trade_count_per_token[mint] % 5 == 0:
+                try:
+                    holders = await fetch_holder_count(mint)
+                    if holders:
+                        pool = await _get_trade_db_pool()
+                        async with pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE tokens SET holders = $1 WHERE id = $2",
+                                holders, token_id
+                            )
+                        logger.info(f"👥 Updated holders for {mint[:12]}... to {holders}")
+                except Exception as e:
+                    logger.debug(f"Holder update error for {mint[:16]}: {e}")
+        
         except Exception as e:
             logger.error(f"Error processing trade for {mint}: {e}")
     
