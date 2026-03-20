@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ src/
 COPY migrations/ migrations/
 COPY scripts/ scripts/
+COPY alembic.ini .
 
 # Create logs directory
 RUN mkdir -p /app/logs
