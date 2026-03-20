@@ -378,6 +378,145 @@ async def get_dashboard_stats():
 
 
 # ============================================================================
+# TOKEN STATS (counts + signal breakdowns)
+# ============================================================================
+@router.get("/tokens/stats")
+async def get_token_stats():
+    """Get token counts broken down by category and signal badge"""
+    try:
+        conn = await get_db()
+
+        # Fetch all tokens with the same scoring logic as /tokens/active
+        tokens = await conn.fetch(
+            """
+            SELECT 
+                t.id, t.mint, t.name, t.symbol, t.market_cap, t.holders,
+                t.raw_create_event,
+                COALESCE((SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type='buy'), 0) as buy_count,
+                COALESCE((SELECT COUNT(*) FROM token_events WHERE token_id=t.id AND event_type='sell'), 0) as sell_count,
+                (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as latest_buy_event,
+                (SELECT raw_event FROM token_events WHERE token_id=t.id AND event_type='create' LIMIT 1) as create_event
+            FROM tokens t
+            ORDER BY t.created_at DESC
+            LIMIT 500
+            """
+        )
+        await conn.close()
+
+        # Initialize counters
+        by_signal = {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0}
+        by_category = {"new_pairs": 0, "final_stretch": 0, "migrated": 0}
+        by_category_and_signal = {
+            "new_pairs": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+            "final_stretch": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+            "migrated": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+        }
+
+        for t in tokens:
+            create_event = {}
+            latest_buy = {}
+            if t["create_event"]:
+                try:
+                    create_event = json.loads(t["create_event"]) if isinstance(t["create_event"], str) else t["create_event"]
+                except:
+                    pass
+            if t["latest_buy_event"]:
+                try:
+                    latest_buy = json.loads(t["latest_buy_event"]) if isinstance(t["latest_buy_event"], str) else t["latest_buy_event"]
+                except:
+                    pass
+
+            v_sol = latest_buy.get("vSolInBondingCurve") or create_event.get("vSolInBondingCurve", 0)
+            bonding_pct = compute_bonding_curve_percent(v_sol)
+            dev_pct = compute_dev_holding_percent(create_event)
+            mc_sol = latest_buy.get("marketCapSol") or create_event.get("marketCapSol", 0)
+            mc_usd = compute_market_cap_usd(mc_sol)
+
+            top_holder_pct = 0.0
+            if latest_buy.get("newTokenBalance") and TOTAL_TOKEN_SUPPLY > 0:
+                top_holder_pct = (latest_buy["newTokenBalance"] / TOTAL_TOKEN_SUPPLY) * 100
+                top_holder_pct = min(top_holder_pct, 100.0)
+
+            # Compute score (same logic as active tokens)
+            score = 0
+            if bonding_pct >= 100:
+                score += 30
+            elif bonding_pct >= 80:
+                score += 20
+            elif bonding_pct >= 50:
+                score += 10
+
+            buy_count = t["buy_count"] or 0
+            if buy_count > 100:
+                score += 20
+            elif buy_count > 50:
+                score += 15
+            elif buy_count > 20:
+                score += 10
+            elif buy_count > 5:
+                score += 5
+
+            if mc_usd > 50000:
+                score += 15
+            elif mc_usd > 10000:
+                score += 10
+            elif mc_usd > 5000:
+                score += 5
+
+            if dev_pct < 2:
+                score += 10
+            elif dev_pct < 5:
+                score += 5
+
+            if top_holder_pct < 5:
+                score += 5
+
+            # Badge
+            if score >= 70:
+                badge = "strong_buy"
+            elif score >= 50:
+                badge = "buy"
+            elif score >= 30:
+                badge = "neutral"
+            else:
+                badge = "none"
+
+            # Category
+            if bonding_pct >= 100:
+                cat = "migrated"
+            elif bonding_pct >= 80:
+                cat = "final_stretch"
+            else:
+                cat = "new_pairs"
+
+            by_signal[badge] += 1
+            by_category[cat] += 1
+            by_category_and_signal[cat][badge] += 1
+
+        total = len(tokens)
+
+        return {
+            "total_tokens": total,
+            "by_signal": by_signal,
+            "by_category": by_category,
+            "by_category_and_signal": by_category_and_signal,
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching token stats: {e}", exc_info=True)
+        return {
+            "total_tokens": 0,
+            "by_signal": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+            "by_category": {"new_pairs": 0, "final_stretch": 0, "migrated": 0},
+            "by_category_and_signal": {
+                "new_pairs": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+                "final_stretch": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+                "migrated": {"strong_buy": 0, "buy": 0, "neutral": 0, "none": 0},
+            },
+        }
+
+
+# ============================================================================
 # FILTERED TOKENS
 # ============================================================================
 @router.get("/tokens/filtered")
