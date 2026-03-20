@@ -335,3 +335,54 @@ class SignalScoringV3:
 
 # Singleton
 scoring_v3 = SignalScoringV3()
+
+
+class ScoringCompatWrapper:
+    """Backward-compatible wrapper for old code that calls scoring.score_token(token_dict).
+    
+    Translates old-format token dicts (from scanner/websocket_scanner) into
+    the new v3 scoring format.
+    """
+
+    def score_token(self, token: Dict) -> Tuple[int, Dict]:
+        """Accept old-style token dict, translate to v3 format."""
+        buy_count = int(token.get("buy_count", 0))
+        sell_count = int(token.get("sell_count", 0))
+        volume_24h = float(token.get("volume_24h", 0))
+        market_cap = float(token.get("market_cap", 0))
+        holders = int(token.get("holders", 0))
+
+        # Estimate buy/sell volume from 24h volume
+        total_txns = buy_count + sell_count
+        if total_txns > 0:
+            buy_ratio = buy_count / total_txns
+        else:
+            buy_ratio = 0.5
+
+        # Convert USD volume to SOL (rough)
+        sol_price = 140.0
+        total_vol_sol = volume_24h / sol_price if volume_24h > 0 else 0
+        buy_vol_sol = total_vol_sol * buy_ratio
+        sell_vol_sol = total_vol_sol * (1 - buy_ratio)
+
+        scoring_data = {
+            "buy_volume_sol": buy_vol_sol,
+            "sell_volume_sol": sell_vol_sol,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "price_change_pct": float(token.get("price_change_5m", 0) or 0),
+            "mc_current": market_cap,
+            "mc_initial": market_cap * 0.8 if market_cap > 0 else 0,  # rough estimate
+            "dev_holding_percent": float(token.get("dev_holding_percent", 0) or 0),
+            "top_holder_percent": float(token.get("top_holder_percent", 0) or 0),
+            "holders": holders,
+            "age_seconds": float(token.get("age_hours", 1) or 1) * 3600,
+            "creator_activity": token.get("creator_activity", "unknown"),
+            "txns_per_minute": total_txns / max(float(token.get("age_hours", 1) or 1) * 60, 1),
+        }
+
+        return scoring_v3.score_token(scoring_data)
+
+
+# Backward-compat singleton (used by scanner.py, websocket_scanner.py)
+scoring = ScoringCompatWrapper()
