@@ -382,8 +382,8 @@ class MomentumEngine:
             return
         buf.add_trade(trader, amount_sol, direction, ts)
         self._buffers.move_to_end(token_id)
-        # Feed degradation engine
-        degradation_engine.on_trade(token_id, amount_sol, direction, market_cap_sol)
+        # Feed degradation engine (pass trader for holder concentration tracking)
+        degradation_engine.on_trade(token_id, amount_sol, direction, market_cap_sol, trader)
 
     def mark_migrated(self, token_id: int):
         """Update token status to migrated (affects signal classification)."""

@@ -473,7 +473,10 @@ class SignalDegradationEngine:
             "large_trade_bonus": state.large_trade_bonus,
             "whale_activity": state.whale_activity_label,
             "total_trades_1m": len(state.trade_history_1m),
-            "large_trades_1m": sum(1 for _ts, amt, _d in state.trade_history_1m if amt >= 1.0),
+            "large_trades_1m": sum(1 for _ts, amt, _d, _t in state.trade_history_1m if amt >= 1.0),
+            # --- Holder concentration ---
+            "unique_traders_1m": state.unique_traders_1m,
+            "holder_concentration_pts": state.holder_concentration_pts,
         }
 
     def get_all_degradation(self) -> Dict[int, Dict]:
@@ -608,6 +611,8 @@ def apply_signal_degradation(
         breakdown["whale_activity"] = degradation_info.get("whale_activity", "neutral")
         breakdown["large_trades_1m"] = degradation_info.get("large_trades_1m", 0)
         breakdown["total_trades_1m"] = degradation_info.get("total_trades_1m", 0)
+        breakdown["unique_traders_1m"] = degradation_info.get("unique_traders_1m", 0)
+        breakdown["holder_concentration_pts"] = degradation_info.get("holder_concentration_pts", 0)
 
     # Update reasons list
     existing_reasons = breakdown.get("reasons", [])
