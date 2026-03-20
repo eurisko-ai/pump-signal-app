@@ -190,14 +190,13 @@ async def _insert_token_and_signal(
             token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
-                                    volume_24h, holders, raw_create_event, bonding_curve_ca, dexscreener_profile, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb, NOW())
+                                    volume_24h, holders, raw_create_event, dexscreener_profile, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, NOW())
                 ON CONFLICT (mint) DO UPDATE SET
                     market_cap = EXCLUDED.market_cap,
                     volume_24h = EXCLUDED.volume_24h,
                     holders = EXCLUDED.holders,
                     image_url = COALESCE(EXCLUDED.image_url, tokens.image_url),
-                    bonding_curve_ca = COALESCE(EXCLUDED.bonding_curve_ca, tokens.bonding_curve_ca),
                     raw_create_event = COALESCE(tokens.raw_create_event, EXCLUDED.raw_create_event),
                     dexscreener_profile = COALESCE(EXCLUDED.dexscreener_profile, tokens.dexscreener_profile),
                     updated_at = NOW()
@@ -212,7 +211,6 @@ async def _insert_token_and_signal(
                 float(token.get("volume_24h", 0)),
                 int(token.get("holders", 0)),
                 raw_event_json,
-                token.get("bonding_curve_ca", ""),
                 dex_profile_json,
             )
 
@@ -322,7 +320,6 @@ def _build_token_dict_from_migration(event: Dict, sol_price: float) -> Dict:
         "age_hours": 0.5, # just migrated — very fresh
         "liquidity_ratio": 15.0,  # newly added liquidity is typically decent
         "top_10_holders_ratio": 0.3,  # default; real data needs on-chain query
-        "bonding_curve_ca": event.get("bondingCurve", ""),  # Axiom.trade link
     }
 
 
@@ -344,7 +341,6 @@ def _build_token_dict_from_create(event: Dict, sol_price: float) -> Dict:
         "liquidity_ratio": 0,
         "bonding_progress": bonding_pct,
         "creator": event.get("traderPublicKey", ""),
-        "bonding_curve_ca": event.get("bondingCurve", ""),  # Axiom.trade link
     }
 
 
@@ -494,10 +490,9 @@ async def _handle_create(event: Dict, sol_price: float):
             token_id = await conn.fetchval(
                 """
                 INSERT INTO tokens (mint, name, symbol, description, image_url, market_cap,
-                                    volume_24h, holders, raw_create_event, bonding_curve_ca, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NOW())
+                                    volume_24h, holders, raw_create_event, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
                 ON CONFLICT (mint) DO UPDATE SET
-                    bonding_curve_ca = COALESCE(EXCLUDED.bonding_curve_ca, tokens.bonding_curve_ca),
                     raw_create_event = COALESCE(EXCLUDED.raw_create_event, tokens.raw_create_event),
                     updated_at = NOW()
                 RETURNING id
@@ -511,7 +506,6 @@ async def _handle_create(event: Dict, sol_price: float):
                 0,
                 1,
                 raw_event_json,
-                token.get("bonding_curve_ca", ""),
             )
             # Also insert into token_events for audit trail
             if token_id:
