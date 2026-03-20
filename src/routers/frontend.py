@@ -70,7 +70,7 @@ async def get_active_tokens():
                 (SELECT created_at FROM token_events WHERE token_id=t.id AND event_type='buy' ORDER BY id DESC LIMIT 1) as last_trade_at
             FROM tokens t
             ORDER BY t.created_at DESC
-            LIMIT 200
+            LIMIT 500
             """
         )
 
